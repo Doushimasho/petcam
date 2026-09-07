@@ -276,9 +276,20 @@ https：//〇〇〇.〇〇〇.ts.net:8443/viewer
 
 ## 家族にも見せたい場合
 
-Tailscaleの管理画面の **「Users」** から招待リンクを送れば、
-相手は自分のアカウントのまま参加できます。
+**招待リンク**を送れば、相手は自分のアカウントのまま参加できます。
 あなたのアカウント情報を教える必要はありません。
+
+作り方は2分です。
+
+1. [login.tailscale.com](https://login.tailscale.com/) を開く
+2. 左メニューの **Users**
+3. **Invite external users** を押す
+4. **Copy invite link** のタブを選ぶ
+5. 権限は **Member** でよい
+6. **Generate & copy invite link** を押す
+
+コピーされたリンクをLINEなどで送れば完了です。
+相手はリンクを開いて、自分のGoogleかAppleのアカウントでサインインするだけです。
 
 ---
 
@@ -593,8 +604,17 @@ https://your-pc.your-network.ts.net:8443/viewer
 Open the camera phone on this new address too (it will ask for the PIN and
 camera permission once more).
 
-To let a family member watch, send them an invite from the **Users** page in the
-Tailscale console. They join with their own account.
+To let a family member watch, send them an **invite link**. It takes 2 minutes:
+
+1. Open [login.tailscale.com](https://login.tailscale.com/)
+2. Go to **Users** in the left menu
+3. Press **Invite external users**
+4. Choose the **Copy invite link** tab
+5. **Member** is the right role
+6. Press **Generate & copy invite link**
+
+Send them that link. They open it and sign in with **their own** Google or Apple
+account — you never share your credentials.
 
 ---
 

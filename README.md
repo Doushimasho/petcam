@@ -157,8 +157,19 @@ PCやスマホのブラウザで `/viewer` を開き、同じPINを入力する�
 - Androidでは **Tailscaleをバッテリー最適化の対象外にする**
   （設定 → アプリ → Tailscale → バッテリー → 制限なし）。
   そうしないとOSがVPNを勝手に切る
-- 見る側の端末にもTailscaleが要る。家族に見せるなら、
-  管理画面の **Users** から招待リンクを送る（無料プランで数人まで）
+- 見る側の端末にもTailscaleが要る。家族に見せるなら招待リンクを送る。
+  作り方は次のとおり（2分）:
+
+  1. [login.tailscale.com](https://login.tailscale.com/) を開く
+  2. 左メニューの **Users**
+  3. **Invite external users** を押す
+  4. **Copy invite link** のタブを選ぶ
+  5. 権限（user role）は **Member** でよい
+  6. **Generate & copy invite link** を押す
+
+  相手はそのリンクを開き、**自分の**GoogleまたはAppleアカウントでサインインする。
+  こちらのアカウント情報を渡す必要はない。
+  `docs/iphone_setup_template.md` を一緒に渡すと、相手側の手順が済む。
 
 ---
 
