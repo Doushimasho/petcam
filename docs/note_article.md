@@ -63,7 +63,7 @@ Windowsでインストールするときは、最初の画面の
 ### コードを取ってくる
 
 ```bash
-git clone （リポジトリのURL）
+git clone https://github.com/Doushimasho/petcam.git
 cd petcam
 ```
 
@@ -273,7 +273,7 @@ JavaScriptがキャッシュされていたこと、そして
 余っているスマホが引き出しにあるなら、試してみてください。
 費用はかかりませんし、うまくいかなくてもスマホは元に戻ります。
 
-**リポジトリ：（ここにURL）**
+**リポジトリ：https://github.com/Doushimasho/petcam**
 
 READMEに、この記事より詳しい手順とトラブル対応をまとめてあります。
 
@@ -331,7 +331,7 @@ On Windows, check **"Add python.exe to PATH"** on the first installer screen.
 Get the code:
 
 ```bash
-git clone （repository URL）
+git clone https://github.com/Doushimasho/petcam.git
 cd petcam
 pip install -r requirements.txt
 ```
@@ -500,7 +500,7 @@ Three lessons:
 If you have a spare phone in a drawer, it costs nothing to try, and the phone
 goes back to normal afterwards.
 
-**Repository: （URL here）**
+**Repository: https://github.com/Doushimasho/petcam**
 
 The README has more detail than this article, including troubleshooting.
 
