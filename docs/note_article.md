@@ -289,7 +289,12 @@ https：//〇〇〇.〇〇〇.ts.net:8443/viewer
 6. **Generate & copy invite link** を押す
 
 コピーされたリンクをLINEなどで送れば完了です。
-相手はリンクを開いて、自分のGoogleかAppleのアカウントでサインインするだけです。
+
+**相手側に事前の準備は要りません。**
+TailscaleにはID・パスワードというものが無く、
+Apple・Google・Microsoft・GitHub のうち**すでに持っているアカウント**で
+サインインすると、その場で登録まで終わります。
+iPhoneを使っている方なら、Apple ID がそのまま使えます。
 
 ---
 
@@ -613,8 +618,12 @@ To let a family member watch, send them an **invite link**. It takes 2 minutes:
 5. **Member** is the right role
 6. Press **Generate & copy invite link**
 
-Send them that link. They open it and sign in with **their own** Google or Apple
-account — you never share your credentials.
+Send them that link.
+
+**They do not need to prepare anything in advance.** Tailscale has no passwords
+of its own — you sign in with an account you already have (Apple, Google,
+Microsoft or GitHub), and the account is created at that moment.
+An iPhone user can simply use their Apple ID. You never share your credentials.
 
 ---
 

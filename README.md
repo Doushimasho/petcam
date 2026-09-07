@@ -167,8 +167,12 @@ PCやスマホのブラウザで `/viewer` を開き、同じPINを入力する�
   5. 権限（user role）は **Member** でよい
   6. **Generate & copy invite link** を押す
 
-  相手はそのリンクを開き、**自分の**GoogleまたはAppleアカウントでサインインする。
+  **相手側に事前準備は要らない。** TailscaleにはID/パスワードが存在せず、
+  Apple・Google・Microsoft・GitHub のいずれか、**すでに持っているアカウント**で
+  サインインすると、その場で登録まで完了する。
+  iPhoneユーザーなら Apple ID をそのまま使える。
   こちらのアカウント情報を渡す必要はない。
+
   `docs/iphone_setup_template.md` を一緒に渡すと、相手側の手順が済む。
 
 ---
