@@ -17,8 +17,10 @@ CERT_DIR = BASE / "certs"
 CERT_FILE = CERT_DIR / "ts-cert.pem"
 KEY_FILE = CERT_DIR / "ts-key.pem"
 
-RENEW_BELOW_DAYS = 25      # 残りがこの日数を切ったら更新する
-CHECK_EVERY_SEC = 12 * 3600
+RENEW_BELOW_DAYS = 25       # 残りがこの日数を切ったら更新する
+CHECK_EVERY_SEC = 12 * 3600 # 証明書を持っているときの見張り間隔
+RETRY_SEC = 20              # まだ取れていないときの再挑戦の間隔
+RETRY_MAX_SEC = 600         # 再挑戦の間隔の上限
 
 CANDIDATES = [
     Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Tailscale" / "tailscale.exe",
@@ -65,6 +67,18 @@ def hostname() -> str | None:
     return name or None
 
 
+def serial() -> int | None:
+    """いま手元にある証明書の識別番号。差し替えの要否を判断するのに使う。"""
+    if not CERT_FILE.exists():
+        return None
+    try:
+        from cryptography import x509
+
+        return x509.load_pem_x509_certificate(CERT_FILE.read_bytes()).serial_number
+    except Exception:
+        return None
+
+
 def days_left() -> float:
     if not CERT_FILE.exists():
         return -1.0
@@ -103,42 +117,56 @@ def ensure() -> tuple[Path, Path, str] | None:
     return CERT_FILE, KEY_FILE, name
 
 
-def start_renewal(reload_fn, log) -> None:
-    """期限が近づいたら勝手に取り直し、動いたまま差し替える。
+def start_watch(apply_fn, log, have_now: bool = False) -> None:
+    """証明書を見張り、必要なら動かしたまま差し替える。
 
-    サーバを止めずに証明書を入れ替えられるようにしておかないと、
-    90日後に突然つながらなくなる。
+    見張る理由は2つある。
+
+    1. **起動直後はTailscaleがまだ立ち上がっていないことがある。**
+       パソコンの電源を入れた直後は特にそうで、その瞬間だけ証明書が取れない。
+       そこで諦めると、自己署名のまま一日中動き続けることになる。
+       （実際にそれが起きた。ブラウザに警告が出続けていた）
+
+    2. 証明書は90日で切れる。期限が近づいたら取り直す必要がある。
+
+    どちらも「取れたら差し替える」で同じ処理になるので、まとめて見張る。
+    サーバを止めずに入れ替えられるので、利用者は何もしなくてよい。
     """
-    name = hostname()
-    if not name:
-        return
+    current = serial() if have_now else None
 
     def loop():
+        nonlocal current
+        wait = 0 if current is None else CHECK_EVERY_SEC
+        backoff = RETRY_SEC
         while True:
-            threading.Event().wait(CHECK_EVERY_SEC)
+            if wait:
+                threading.Event().wait(wait)
             try:
-                left = days_left()
-                if left >= RENEW_BELOW_DAYS:
-                    continue
-                ok, msg = fetch(name)
-                if ok:
-                    reload_fn()
-                    log.info("HTTPS証明書を更新しました（残り %.0f 日だったため）", left)
-                else:
-                    log.warning("HTTPS証明書の更新に失敗しました: %s", msg)
-            except Exception as e:
-                log.warning("HTTPS証明書の更新中に問題が起きました: %s", e)
+                got = ensure()
+            except Exception:
+                got = None
 
-    threading.Thread(target=loop, daemon=True, name="ts-cert-renew").start()
+            if got:
+                found = serial()
+                if found is not None and found != current:
+                    try:
+                        apply_fn(got[0], got[1])
+                        first = current is None
+                        current = found
+                        log.info(
+                            "Tailscaleの正式な証明書に切り替えました（%s）" if first
+                            else "証明書を新しいものに差し替えました（%s）",
+                            got[2],
+                        )
+                    except Exception as e:
+                        log.warning("証明書の差し替えに失敗しました: %s", e)
 
+            if current is None:
+                # まだ取れていない。間隔を少しずつ広げながら待つ
+                wait = backoff
+                backoff = min(backoff * 2, RETRY_MAX_SEC)
+            else:
+                wait = CHECK_EVERY_SEC
+                backoff = RETRY_SEC
 
-if __name__ == "__main__":
-    p = exe()
-    print("Tailscale:", p or "見つかりません")
-    print("この端末の名前:", hostname() or "取得できません")
-    got = ensure()
-    if got:
-        print(f"証明書: 使えます（残り {days_left():.0f} 日）")
-        print(f"  {got[0]}")
-    else:
-        print("証明書: まだ使えません（管理画面で HTTPS を有効にしてください）")
+    threading.Thread(target=loop, daemon=True, name="ts-cert").start()

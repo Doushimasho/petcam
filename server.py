@@ -438,6 +438,23 @@ app.add_url_rule("/ws", "ws", ws_endpoint, websocket=True)
 
 
 # ---- 起動 --------------------------------------------------------------
+def ensure_output() -> bool:
+    """コンソールが無い状態でも動くようにする。
+
+    自動起動では画面を出さずに走らせるため、print() の書き込み先が
+    存在しない。そのまま呼ぶと例外で落ちるので、捨て先を用意しておく。
+    表示したい内容は、画面ではなく記録のほうへ回す。
+
+    画面がある場合は True を返す。
+    """
+    has_console = sys.stdout is not None and sys.stderr is not None
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, "w", encoding="utf-8")
+    if sys.stderr is None:
+        sys.stderr = open(os.devnull, "w", encoding="utf-8")
+    return has_console
+
+
 def disable_console_quick_edit() -> None:
     """黒い画面の「選択モード」を無効にする。
 
@@ -508,36 +525,48 @@ def read_port() -> int:
 
 
 def main() -> None:
+    has_console = ensure_output()
     disable_console_quick_edit()
     log_path = route_access_log_to_file()
 
+    def say(text: str = "") -> None:
+        """画面があれば画面へ、無ければ記録へ。"""
+        if has_console:
+            print(text)
+        elif text.strip():
+            logging.getLogger("werkzeug").info(text.strip())
+
     port = read_port()
     if port_in_use(port):
-        print(f"ポート {port} は既に使われています。")
-        print("先に起動しているサーバの黒い画面を × で閉じてから、")
-        print("もう一度この起動ファイルを実行してください。")
-        print("（止まっている黒い画面は Ctrl+C では閉じないことがあります）")
+        say(f"ポート {port} は既に使われています。")
+        say("先に起動しているサーバの黒い画面を × で閉じてから、")
+        say("もう一度この起動ファイルを実行してください。")
+        say("（止まっている黒い画面は Ctrl+C では閉じないことがあります）")
         sys.exit(1)
 
     # --http は動作確認用。localhost は HTTPS でなくても
     # ブラウザが安全なコンテキストとして扱うのでカメラが開ける。
     # 他の端末からは見えないよう 127.0.0.1 にだけ待ち受ける。
     if "--http" in sys.argv:
-        print("=" * 60)
-        print("  PET CAMERA （動作確認モード / このPC内だけ）")
-        print("=" * 60)
-        print(f"  PIN      : {CONFIG['pin']}")
-        print(f"  カメラ   : http://127.0.0.1:{port}/camera")
-        print(f"  視聴     : http://127.0.0.1:{port}/viewer")
-        print("  ※ スマホからは見えません。実機で使うときは --http を外してください。")
-        print("=" * 60)
+        say("=" * 60)
+        say("  PET CAMERA （動作確認モード / このPC内だけ）")
+        say("=" * 60)
+        say(f"  PIN      : {CONFIG['pin']}")
+        say(f"  カメラ   : http://127.0.0.1:{port}/camera")
+        say(f"  視聴     : http://127.0.0.1:{port}/viewer")
+        say("  ※ スマホからは見えません。実機で使うときは --http を外してください。")
+        say("=" * 60)
         app.run(host="127.0.0.1", port=port, threaded=True)
         return
 
     ip = make_cert.local_ip()
 
     # Tailscale の正式な証明書が使えるならそちらを使う。
-    # 使えなければ自己署名で動く（家の中では今までどおり）。
+    # 使えなければ、ひとまず自己署名で動き始める。
+    #
+    # パソコンの電源を入れた直後は、Tailscale がまだ立ち上がっていないことがある。
+    # その瞬間に諦めてしまうと、自己署名のまま一日中動き続けることになるので、
+    # 下の見張りが用意のできた時点で、動かしたまま差し替える。
     ts = ts_cert.ensure()
     if ts:
         cert, key, ts_name = ts
@@ -546,41 +575,46 @@ def main() -> None:
         ts_name = None
 
     # 証明書を入れ替えられるように、SSLの設定を自分で持つ。
-    # こうしておかないと、期限が切れたときにサーバを止めるまで直せない。
+    # こうしておかないと、サーバを止めるまで差し替えられない。
     ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ssl_ctx.load_cert_chain(str(cert), str(key))
 
     log = logging.getLogger("werkzeug")
-    if ts_name:
-        ts_cert.start_renewal(
-            lambda: ssl_ctx.load_cert_chain(str(cert), str(key)), log
-        )
+    ts_cert.start_watch(
+        lambda c, k: ssl_ctx.load_cert_chain(str(c), str(k)),
+        log,
+        have_now=ts_name is not None,
+    )
 
-    print("=" * 60)
-    print("  PET CAMERA サーバを起動しました")
-    print("=" * 60)
-    print(f"  PIN            : {CONFIG['pin']}")
-    print()
+    say("=" * 60)
+    say("  PET CAMERA サーバを起動しました")
+    say("=" * 60)
+    say(f"  PIN            : {CONFIG['pin']}")
+    say()
     if ts_name:
-        print("  どこからでも（Tailscaleに繋いだ端末）")
-        print(f"    スマホ（カメラ）: https://{ts_name}:{port}/camera")
-        print(f"    PC（視聴）      : https://{ts_name}:{port}/viewer")
-        print()
-        print(f"  証明書は正式なものです（残り {ts_cert.days_left():.0f} 日・自動更新）。")
-        print("  警告は出ません。上のアドレスを使ってください。")
-        print()
-        print(f"  ※ 家の中だけで使う場合の直接アドレスは https://{ip}:{port}/")
-        print("     こちらは警告が出ます。普段は上のアドレスで統一してください。")
+        say("  どこからでも（Tailscaleに繋いだ端末）")
+        say(f"    スマホ（カメラ）: https://{ts_name}:{port}/camera")
+        say(f"    PC（視聴）      : https://{ts_name}:{port}/viewer")
+        say()
+        say(f"  証明書は正式なものです（残り {ts_cert.days_left():.0f} 日・自動更新）。")
+        say("  警告は出ません。上のアドレスを使ってください。")
+        say()
+        say(f"  ※ 家の中だけで使う場合の直接アドレスは https://{ip}:{port}/")
+        say("     こちらは警告が出ます。普段は上のアドレスで統一してください。")
     else:
-        print(f"  スマホ（カメラ）: https://{ip}:{port}/camera")
-        print(f"  PC（視聴）      : https://{ip}:{port}/viewer")
-        print()
-        print('  ※ 初回は「接続はプライベートではありません」の警告が出ます。')
-        print("     詳細設定 →「安全でないページに移動」で進んでください。")
-        print("     自己署名証明書のため出る警告で、LAN内では想定どおりです。")
-    print()
-    print(f"  記録: {log_path}")
-    print("=" * 60)
+        say(f"  スマホ（カメラ）: https://{ip}:{port}/camera")
+        say(f"  PC（視聴）      : https://{ip}:{port}/viewer")
+        say()
+        say('  ※ 初回は「接続はプライベートではありません」の警告が出ます。')
+        say("     詳細設定 →「安全でないページに移動」で進んでください。")
+        say("     自己署名証明書のため出る警告で、LAN内では想定どおりです。")
+        if ts_cert.exe():
+            say()
+            say("  ※ Tailscaleの正式な証明書はまだ取れていません。")
+            say("     用意ができ次第、サーバを止めずに自動で切り替えます。")
+    say()
+    say(f"  記録: {log_path}")
+    say("=" * 60)
 
     app.run(host="0.0.0.0", port=port, ssl_context=ssl_ctx, threaded=True)
 
