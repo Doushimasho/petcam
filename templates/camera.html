@@ -148,10 +148,45 @@
     errBox.hidden = false;
   }
 
+  /* この端末のカメラがズームに対応しているかを調べる。
+     対応の有無も倍率の範囲も機種によって違うので、見る側へ伝えて
+     操作できるかどうかを向こうで判断してもらう。 */
+  function zoomInfo() {
+    if (!stream) return null;
+    const track = stream.getVideoTracks()[0];
+    if (!track || !track.getCapabilities) return null;
+    let caps;
+    try { caps = track.getCapabilities(); } catch (e) { return null; }
+    if (!caps || !caps.zoom) return null;
+    const now = track.getSettings ? track.getSettings() : {};
+    return {
+      min: caps.zoom.min,
+      max: caps.zoom.max,
+      step: caps.zoom.step || 0.1,
+      value: (now.zoom != null) ? now.zoom : caps.zoom.min
+    };
+  }
+
+  /* カメラ側でズームすると、センサーの中央を使って撮り直すことになる。
+     見る側で引き伸ばすのと違って、送られる映像そのものが精細になる。 */
+  async function applyZoom(value) {
+    const info = zoomInfo();
+    if (!info) return;
+    const track = stream.getVideoTracks()[0];
+    const v = Math.min(Math.max(Number(value), info.min), info.max);
+    try {
+      await track.applyConstraints({ advanced: [{ zoom: v }] });
+    } catch (e) {
+      return;
+    }
+    reportCamera('on');  // 反映後の倍率を見る側へ返す
+  }
+
   function reportCamera(st, err) {
     conn.send({
       t: 'camera_state', state: st, error: err || null, audio: audioOn,
-      sounds: Object.keys(PETCAM_SOUNDS)   // 見る側が版の食い違いに気づけるように
+      sounds: Object.keys(PETCAM_SOUNDS),  // 見る側が版の食い違いに気づけるように
+      zoom: (st === 'on') ? zoomInfo() : null
     });
     $('t-cam').textContent = st.toUpperCase();
     setDot($('d-cam'), st === 'on' ? 'ok' : (st === 'error' ? 'err' : ''));
@@ -407,6 +442,7 @@
     else if (m.action === 'camera_off') stopCamera();
     else if (m.action === 'audio_on') setAudio(true);
     else if (m.action === 'audio_off') setAudio(false);
+    else if (m.action === 'zoom') applyZoom(m.value);
     else if (m.action === 'chime') {
       sound.play(m.sound, m.volume).then((err) => {
         // 鳴ったかどうかを押した人に返す。

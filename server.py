@@ -110,6 +110,7 @@ state = {
     "error": None,
     "audio": False,
     "sounds": None,   # カメラ端末が知っている音の名前
+    "zoom": None,     # ズームの範囲と現在の倍率（非対応なら None）
     "last_chime": 0.0,
 }
 
@@ -124,6 +125,7 @@ def snapshot() -> dict:
             "error": state["error"],
             "audio": state["audio"],
             "sounds": state["sounds"],
+            "zoom": state["zoom"],
             "viewers": viewers,
         }
 
@@ -325,6 +327,16 @@ def handle_message(peer: Peer, msg: dict) -> None:
             got = msg.get("sounds")
             if isinstance(got, list):
                 state["sounds"] = [str(x)[:16] for x in got[:10]]
+            z = msg.get("zoom")
+            if isinstance(z, dict):
+                try:
+                    state["zoom"] = {
+                        k: float(z[k]) for k in ("min", "max", "step", "value")
+                    }
+                except (KeyError, TypeError, ValueError):
+                    state["zoom"] = None
+            else:
+                state["zoom"] = None
         broadcast_state()
     elif t == "cmd":
         # 視聴側からカメラ端末への指示。カメラ端末以外へは流さない。
@@ -332,10 +344,15 @@ def handle_message(peer: Peer, msg: dict) -> None:
             return
         action = msg.get("action")
         if action not in (
-            "camera_on", "camera_off", "audio_on", "audio_off", "chime"
+            "camera_on", "camera_off", "audio_on", "audio_off", "chime", "zoom"
         ):
             return
         out = {"t": "cmd", "action": action, "from": peer.sid}
+        if action == "zoom":
+            try:
+                out["value"] = float(msg.get("value"))
+            except (TypeError, ValueError):
+                return
         if action == "chime":
             # 連打で鳴らし続けられないようにする。
             # 相手はペットや子どものいる部屋なので、鳴らしすぎは害になる。
@@ -401,6 +418,7 @@ def on_close(peer: Peer) -> None:
             state["error"] = None
             state["audio"] = False
             state["sounds"] = None
+            state["zoom"] = None
         cam = state["camera_sid"]
     if peer.role == "viewer" and cam:
         send_to(cam, {"t": "viewer_left", "sid": peer.sid})

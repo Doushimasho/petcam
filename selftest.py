@@ -152,6 +152,26 @@ def main() -> int:
     cam.send(json.dumps({"t": "cmd", "action": "camera_off"}))
     check("カメラ側からの指示は流れない", wait_for(cam, "cmd", timeout=1.0) is None)
 
+    print("--- ズーム ---")
+    cam.send(json.dumps({
+        "t": "camera_state", "state": "on",
+        "zoom": {"min": 1, "max": 8, "step": 0.1, "value": 1},
+    }))
+    st = wait_for(viewer, "state")
+    check("ズームの範囲が視聴側へ伝わる",
+          bool(st and st.get("zoom") and st["zoom"]["max"] == 8.0), st)
+    viewer.send(json.dumps({"t": "cmd", "action": "zoom", "value": 2.5}))
+    cmd = wait_for(cam, "cmd")
+    check("ズームの指示が倍率ごと届く",
+          bool(cmd and cmd["action"] == "zoom" and abs(cmd.get("value", 0) - 2.5) < 0.01),
+          cmd)
+    viewer.send(json.dumps({"t": "cmd", "action": "zoom", "value": "たくさん"}))
+    check("数値でないズーム指示は無視される",
+          wait_for(cam, "cmd", timeout=1.0) is None)
+    cam.send(json.dumps({"t": "camera_state", "state": "on", "zoom": None}))
+    st = wait_for(viewer, "state")
+    check("非対応なら zoom は空で伝わる", bool(st and st.get("zoom") is None), st)
+
     print("--- つなぎ直しの要求 ---")
     viewer.send(json.dumps({"t": "sync", "force": True}))
     inv = wait_for(cam, "new_viewer")

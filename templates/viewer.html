@@ -37,6 +37,21 @@
     <button id="btn-snap" disabled>スナップショット</button>
   </div>
 
+  <div class="card" id="zoom-card" style="margin-top:14px" hidden>
+    <div class="row" style="border:0; padding:0 0 8px">
+      <span class="label">ズーム</span>
+      <span class="val" id="t-zoom">1.0×</span>
+    </div>
+    <div class="seg3" id="zoom-controls">
+      <button id="z-out">−</button>
+      <button id="z-reset">リセット</button>
+      <button id="z-in">＋</button>
+    </div>
+    <p class="sub" id="zoom-note">
+      カメラ側で寄せるので、拡大しても映像が粗くなりません。
+    </p>
+  </div>
+
   <div class="card" style="margin-top:14px">
     <div class="label" style="margin-bottom:8px">カメラ端末から音を鳴らす</div>
     <button class="primary" id="btn-chime" style="width:100%" disabled>♪ 音を鳴らす</button>
@@ -113,6 +128,7 @@
   let chimeSound = localStorage.getItem('petcam.sound');
   let chimeVolume = localStorage.getItem('petcam.volume');
   let camSounds = null;   // カメラ端末が知っている音の一覧
+  let camZoom = null;     // ズームの範囲と現在の倍率（非対応なら null）
   if (SOUND_KEYS.indexOf(chimeSound) < 0) chimeSound = 'chime';
   if (!(chimeVolume in VOLUMES)) chimeVolume = 'low';
 
@@ -311,6 +327,7 @@
     camOn = (m.camera === 'on');
     camAudio = !!m.audio;
     camSounds = Array.isArray(m.sounds) ? m.sounds : null;
+    camZoom = (m.zoom && typeof m.zoom.max === 'number') ? m.zoom : null;
     $('t-cam').textContent = (m.camera || 'off').toUpperCase();
     setDot($('d-cam'), camOn ? 'ok' : (m.camera === 'error' ? 'err' : ''));
 
@@ -332,6 +349,7 @@
     }
     updateMediaButtons();
     updateChimeButtons();
+    updateZoom();
   });
 
   conn.on('open', () => {
@@ -432,6 +450,48 @@
       setTimeout(() => URL.revokeObjectURL(url), 10000);
     }, 'image/png');
   });
+
+  /* ズームの表示。
+     倍率の数え方は機種によって違う（1〜8のこともあれば100〜800のことも）。
+     最小値を1倍とみなして相対で見せると、どの機種でも同じ読み方になる。 */
+  function zoomStep() {
+    if (!camZoom) return 0;
+    return Math.max(camZoom.step, (camZoom.max - camZoom.min) / 10);
+  }
+
+  function updateZoom() {
+    const card = $('zoom-card');
+    if (!camOn) { card.hidden = true; return; }
+    card.hidden = false;
+
+    if (!camZoom) {
+      $('zoom-controls').hidden = true;
+      $('t-zoom').textContent = '非対応';
+      $('zoom-note').textContent =
+        'このカメラ端末はズームに対応していません。';
+      return;
+    }
+    $('zoom-controls').hidden = false;
+    const times = camZoom.min > 0 ? camZoom.value / camZoom.min : camZoom.value;
+    $('t-zoom').textContent = times.toFixed(1) + '×';
+    $('z-out').disabled = camZoom.value <= camZoom.min + 1e-6;
+    $('z-in').disabled = camZoom.value >= camZoom.max - 1e-6;
+    $('z-reset').disabled = camZoom.value <= camZoom.min + 1e-6;
+    const maxTimes = camZoom.min > 0 ? camZoom.max / camZoom.min : camZoom.max;
+    $('zoom-note').textContent =
+      'カメラ側で寄せるので、拡大しても映像が粗くなりません（最大 '
+      + maxTimes.toFixed(1) + '×）。';
+  }
+
+  function sendZoom(value) {
+    if (!camZoom) return;
+    const v = Math.min(Math.max(value, camZoom.min), camZoom.max);
+    conn.send({ t: 'cmd', action: 'zoom', value: v });
+  }
+
+  $('z-in').addEventListener('click', () => sendZoom(camZoom.value + zoomStep()));
+  $('z-out').addEventListener('click', () => sendZoom(camZoom.value - zoomStep()));
+  $('z-reset').addEventListener('click', () => sendZoom(camZoom.min));
 
   function updateChimeButtons() {
     for (const k of SOUND_KEYS) {
