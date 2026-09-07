@@ -1,0 +1,511 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pet Camera</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<div class="wrap">
+  <h1>Pet Camera</h1>
+
+  <div class="card">
+    <div class="row">
+      <span class="label">DEVICE</span>
+      <span class="val"><i class="dot" id="d-online"></i><span id="t-online">OFFLINE</span></span>
+    </div>
+    <div class="row">
+      <span class="label">CAMERA</span>
+      <span class="val"><i class="dot" id="d-cam"></i><span id="t-cam">OFF</span></span>
+    </div>
+    <div class="row">
+      <span class="label">SOUND</span>
+      <span class="val"><i class="dot" id="d-audio"></i><span id="t-audio">OFF</span></span>
+    </div>
+  </div>
+
+  <div class="stage" id="stage">
+    <video id="remote" autoplay playsinline muted></video>
+    <div class="overlay" id="overlay">カメラ端末の接続を待っています</div>
+  </div>
+
+  <div class="buttons">
+    <button class="primary" id="btn-on" disabled>CAMERA ON</button>
+    <button id="btn-off" disabled>CAMERA OFF</button>
+    <button id="btn-audio" disabled>音を出す</button>
+    <button id="btn-snap" disabled>スナップショット</button>
+  </div>
+
+  <div class="card" style="margin-top:14px">
+    <div class="label" style="margin-bottom:8px">カメラ端末から音を鳴らす</div>
+    <button class="primary" id="btn-chime" style="width:100%" disabled>♪ 音を鳴らす</button>
+
+    <div class="label" style="margin:16px 0 8px">音の種類（押すと手元で試聴）</div>
+    <div class="seg3">
+      <button id="s-chime" aria-pressed="true">チャイム</button>
+      <button id="s-call" aria-pressed="false">呼びかけ</button>
+      <button id="s-melody" aria-pressed="false">メロディ</button>
+    </div>
+
+    <div class="label" style="margin:16px 0 8px">音量</div>
+    <div class="seg">
+      <button id="v-low" aria-pressed="true">小</button>
+      <button id="v-high" aria-pressed="false">大</button>
+    </div>
+
+    <div class="msg" id="chime-msg"></div>
+    <p class="sub">
+      カメラを置いた端末のスピーカーから鳴ります。<br>
+      端末の音量が下がっていると聞こえません。
+    </p>
+  </div>
+
+  <div class="err" id="error" hidden></div>
+
+  <p class="note">
+    ボタンが押せないときは、カメラ端末が接続されていません。<br>
+    カメラ端末側で最初に一度 CAMERA ON を押して許可を済ませておく必要があります。<br>
+    映像が止まったときは自動でつなぎ直します。<br>
+    「音を聞く」を押すとカメラ端末が音を拾い始めます（数秒かかります）。<br>
+    スナップショットはiPhoneでは画像が開くので、長押しで保存してください。
+    <a href="/logout" style="color:var(--dim)">ログアウト</a>
+  </p>
+</div>
+
+<script src="{{ url_for('static', filename='conn.js') }}"></script>
+<script src="{{ url_for('static', filename='sounds.js') }}"></script>
+<script>
+(function () {
+  const $ = (id) => document.getElementById(id);
+  const video = $('remote');
+  const overlay = $('overlay');
+  const errBox = $('error');
+
+  const RTC_CONFIG = { iceServers: {{ ice_servers | tojson }} };
+  const STALL_MS = 8000;      // これだけ映像が進まなければ壊れたとみなす
+  const RETRY_GAP_MS = 4000;  // つなぎ直しの要求を出す間隔の下限
+
+  let pc = null;
+  let pendingIce = [];
+  let hasStream = false;
+  let camOn = false;
+  let needsTap = false;       // 自動再生が止められ、タップ待ちになっている
+  let hasAudio = false;       // 届いた映像に音が付いているか
+  let camAudio = false;       // カメラ端末が音を拾う設定になっているか
+  let online = false;
+  let wantSound = false;      // 音を聞きたい、と押された状態
+  let myGen = null;           // いま応答すべき申し込みの番号
+  let lastRequestAt = 0;
+  let lastMediaTime = 0;
+  let lastProgressAt = Date.now();
+
+  const conn = new Conn('viewer');
+
+  // ---- カメラ端末から音を鳴らす ----------------------------------------
+  // 操作するのは見ている側なので、音の種類も音量もこちらに置く。
+  // カメラ端末は別の部屋にあり、そこへ設定を取りに行かせてはいけない。
+  const SOUND_KEYS = ['chime', 'call', 'melody'];
+  const VOLUMES = { low: 0.10, high: 0.65 };
+  const preview = createSoundPlayer();
+
+  // 以前の設定（ベルや音量「中」）が残っていても困らないようにする
+  let chimeSound = localStorage.getItem('petcam.sound');
+  let chimeVolume = localStorage.getItem('petcam.volume');
+  let camSounds = null;   // カメラ端末が知っている音の一覧
+  if (SOUND_KEYS.indexOf(chimeSound) < 0) chimeSound = 'chime';
+  if (!(chimeVolume in VOLUMES)) chimeVolume = 'low';
+
+  /* 映像がつながらないときの原因調べ。
+     どんな経路の候補を出し合い、どこで止まったのかをサーバの記録に残す。
+     出しすぎると記録が埋まるので上限を設ける。 */
+  let diagLeft = 60;
+  function diag(text) {
+    if (diagLeft-- <= 0) return;
+    conn.send({ t: 'diag', text: String(text).slice(0, 200) });
+  }
+  function briefCandidate(c) {
+    if (!c) return '(終了)';
+    // 相手から届いた候補はただのデータなので、種類などの項目が無い。
+    // 元の文字列を読んで補う（candidate:... 1 udp 優先度 アドレス ポート typ 種類）
+    const p = (c.candidate || '').split(' ');
+    const type = c.type || (p[6] === 'typ' ? p[7] : '?');
+    const proto = c.protocol || p[2] || '?';
+    const addr = c.address || p[4] || '?';
+    const port = c.port || p[5] || '';
+    return [type, proto, addr, port].join(' ');
+  }
+
+
+  function setDot(el, cls) {
+    el.className = 'dot' + (cls ? ' ' + cls : '');
+  }
+
+  function setOverlay(text) {
+    if (text) { overlay.textContent = text; overlay.hidden = false; }
+    else { overlay.hidden = true; }
+  }
+
+  function closePeer() {
+    if (pc) { try { pc.close(); } catch (e) {} pc = null; }
+    pendingIce = [];
+    hasStream = false;
+    needsTap = false;
+    hasAudio = false;
+    myGen = null;
+    lastMediaTime = 0;
+    video.srcObject = null;
+    updateMediaButtons();
+  }
+
+  /* つなぎ直しをカメラ側へ頼む。
+     force は「今の映像接続は壊れている」という申告で、
+     これが無いとカメラ側が「もう繋がっている」と判断して作り直してくれない。 */
+  function requestReconnect(force) {
+    const now = Date.now();
+    if (now - lastRequestAt < RETRY_GAP_MS) return;
+    lastRequestAt = now;
+    conn.send({ t: 'sync', force: !!force });
+  }
+
+  // ---- WebRTC（受け取る側。offer に answer を返す） -------------------
+  conn.on('offer', async (m) => {
+    closePeer();
+    const from = m.from;
+    const gen = m.gen;
+    myGen = gen;
+
+    const self = new RTCPeerConnection(RTC_CONFIG);
+    pc = self;
+
+    self.ontrack = (ev) => {
+      if (pc !== self) return;
+      video.srcObject = ev.streams[0];
+      hasStream = true;
+      hasAudio = ev.streams[0].getAudioTracks().length > 0;
+      lastMediaTime = 0;
+      lastProgressAt = Date.now();
+      setOverlay('');
+      // 必ず消音で再生を始める。音を足すのはそのあと。
+      // 順番を逆にすると、音を断られたときに映像まで止まってしまう。
+      // iPhone の Safari は、音が無い映像でも自動再生を断ることがある。
+      video.muted = true;
+      const p = video.play();
+      if (p && p.then) {
+        p.then(() => {
+          needsTap = false;
+          if (wantSound && hasAudio) tryUnmute();
+        }).catch(() => {
+          needsTap = true;
+          setOverlay('タップして再生');
+        });
+      }
+      updateMediaButtons();
+    };
+    self.onicecandidate = (ev) => {
+      if (ev.candidate) {
+        conn.send({ t: 'ice', to: from, candidate: ev.candidate, gen: gen });
+        diag('自分の候補 ' + briefCandidate(ev.candidate));
+      } else {
+        diag('候補の洗い出し終了');
+      }
+    };
+    self.oniceconnectionstatechange = () => {
+      if (pc !== self) return;
+      diag('ICE ' + self.iceConnectionState);
+      if (self.iceConnectionState === 'connected') reportSelectedPath(self);
+    };
+    self.onconnectionstatechange = () => {
+      if (pc !== self) return;
+      diag('接続 ' + self.connectionState);
+      if (['failed', 'closed'].includes(self.connectionState)) {
+        hasStream = false;
+        setOverlay('映像が切れました。つなぎ直しています');
+        requestReconnect(true);
+      }
+      // disconnected は一時的な揺れで戻ることがある。
+      // 戻らなければ、下の見張りが拾って作り直す。
+    };
+
+    try {
+      await self.setRemoteDescription(m.sdp);
+      for (const c of pendingIce) { try { await self.addIceCandidate(c); } catch (e) {} }
+      pendingIce = [];
+      const answer = await self.createAnswer();
+      await self.setLocalDescription(answer);
+      conn.send({ t: 'answer', to: from, sdp: self.localDescription, gen: gen });
+    } catch (e) {
+      errBox.textContent = '映像の接続に失敗しました: ' + e;
+      errBox.hidden = false;
+    }
+  });
+
+  $('stage').addEventListener('click', () => {
+    if (!video.srcObject || !video.paused) return;
+    video.play().then(() => {
+      needsTap = false;
+      setOverlay('');
+    }).catch(() => {});
+  });
+
+  conn.on('ice', async (m) => {
+    if (m.gen !== undefined && m.gen !== myGen) return;  // 古い申し込みのぶんは捨てる
+    if (!pc || !pc.remoteDescription) { pendingIce.push(m.candidate); return; }
+    diag('相手の候補 ' + briefCandidate(m.candidate));
+    try { await pc.addIceCandidate(m.candidate); } catch (e) {}
+  });
+
+  /* 映像が止まっていないか見張る。
+
+     接続が切れたことにブラウザが気づかないまま、絵だけ止まることがある。
+     状態表示に頼らず、実際に映像が進んでいるかで判断する。 */
+  setInterval(() => {
+    if (hasStream && video.currentTime > lastMediaTime + 0.05) {
+      lastMediaTime = video.currentTime;
+      lastProgressAt = Date.now();
+      // 実際に映像が動いているなら、案内を出しておく理由がない。
+      // 状態を見て消すのではなく、映っている事実を見て消す。
+      if (needsTap || !overlay.hidden) {
+        needsTap = false;
+        setOverlay('');
+        updateMediaButtons();
+      }
+    }
+    if (!camOn) { lastProgressAt = Date.now(); return; }
+    // 映像は届いているが再生が止められているだけなら、接続の問題ではない。
+    // ここで作り直すと、タップ待ちのまま延々と繋ぎ直すことになる。
+    if (video.srcObject && video.paused) { lastProgressAt = Date.now(); return; }
+    if (Date.now() - lastProgressAt > STALL_MS) {
+      hasStream = false;
+      setOverlay('映像が止まりました。つなぎ直しています');
+      requestReconnect(true);
+      lastProgressAt = Date.now();  // 次の判定まで間を置く
+    }
+  }, 2000);
+
+  // ---- 状態表示 --------------------------------------------------------
+  /* つながったとき、実際にどの経路が使われたかを記録する。
+     候補は沢山あっても、実際に通るのは1組だけ。そこが知りたい。 */
+  async function reportSelectedPath(peer) {
+    try {
+      const stats = await peer.getStats();
+      let pair = null;
+      const byId = new Map();
+      stats.forEach((r) => byId.set(r.id, r));
+      stats.forEach((r) => {
+        if (r.type === 'candidate-pair' && r.state === 'succeeded' && r.nominated) pair = r;
+      });
+      if (!pair) return;
+      const l = byId.get(pair.localCandidateId) || {};
+      const r = byId.get(pair.remoteCandidateId) || {};
+      diag('採用された経路 自分[' + (l.candidateType || '?') + ' ' + (l.address || '?') +
+           '] -> 相手[' + (r.candidateType || '?') + ' ' + (r.address || '?') + ']');
+    } catch (e) {}
+  }
+
+  conn.on('state', (m) => {
+    $('t-online').textContent = m.online ? 'ONLINE' : 'OFFLINE';
+    setDot($('d-online'), m.online ? 'ok' : '');
+
+    online = !!m.online;
+    camOn = (m.camera === 'on');
+    camAudio = !!m.audio;
+    camSounds = Array.isArray(m.sounds) ? m.sounds : null;
+    $('t-cam').textContent = (m.camera || 'off').toUpperCase();
+    setDot($('d-cam'), camOn ? 'ok' : (m.camera === 'error' ? 'err' : ''));
+
+    if (m.error) { errBox.textContent = m.error; errBox.hidden = false; }
+    else { errBox.hidden = true; }
+
+    $('btn-on').disabled = !m.online || camOn;
+    $('btn-off').disabled = !m.online || !camOn;
+
+    if (!m.online) {
+      closePeer();
+      setOverlay('カメラ端末が接続されていません');
+    } else if (!camOn) {
+      closePeer();
+      setOverlay('カメラは停止中です');
+    } else if (!hasStream) {
+      setOverlay('映像を受信しています…');
+      requestReconnect(false);
+    }
+    updateMediaButtons();
+    updateChimeButtons();
+  });
+
+  conn.on('open', () => {
+    // ここでは何も作り直さない。
+    // 映像が届いているならそのまま使い続ければよく、
+    // 止まっていれば下の見張りが気づいて作り直しを頼む。
+  });
+
+  conn.on('close', () => {
+    $('t-online').textContent = 'OFFLINE';
+    setDot($('d-online'), '');
+    setOverlay('サーバとの接続が切れました。再接続しています');
+  });
+
+  // ---- 音とスナップショット --------------------------------------------
+  /* 音は2段構えになっている。
+     　1. カメラ端末が音を拾っているか（電池を使うので既定はオフ）
+     　2. こちらで鳴らすか（消音してないとブラウザが自動再生を止める）
+     カメラは別の部屋にあるので、1もここから操作できないと意味がない。
+     利用者から見れば「聞きたい／もういい」の2つだけになるようにする。 */
+  function listening() {
+    return camAudio && hasAudio && !video.muted;
+  }
+
+  function updateMediaButtons() {
+    $('btn-snap').disabled = !(hasStream && video.srcObject);
+
+    const b = $('btn-audio');
+    if (listening()) {
+      b.disabled = false;
+      b.textContent = '音を止める';
+    } else if (camAudio && !hasAudio) {
+      b.disabled = true;
+      b.textContent = '音声を準備中…';
+    } else {
+      b.disabled = !online;
+      b.textContent = '音を聞く';
+    }
+
+    $('t-audio').textContent = camAudio ? (video.muted ? 'ON（消音中）' : 'ON') : 'OFF';
+    setDot($('d-audio'), listening() ? 'ok' : '');
+  }
+
+  /* 音を出す。断られても映像だけは必ず流し続ける。
+     音はあれば嬉しいもので、映像は止めてはいけないもの。 */
+  function tryUnmute() {
+    video.muted = false;
+    const p = video.play();
+    if (p && p.catch) {
+      p.catch(() => {
+        video.muted = true;
+        video.play().catch(() => {});
+        updateMediaButtons();
+      });
+    }
+    updateMediaButtons();
+  }
+
+  $('btn-audio').addEventListener('click', () => {
+    if (listening()) {
+      // 聞くのをやめる。カメラ側の集音も止めて電池を節約する
+      video.muted = true;
+      wantSound = false;
+      conn.send({ t: 'cmd', action: 'audio_off' });
+      updateMediaButtons();
+      return;
+    }
+    wantSound = true;
+    if (!camAudio) {
+      // まずカメラ端末に音を拾わせる。届いたら自動で鳴らす
+      conn.send({ t: 'cmd', action: 'audio_on' });
+      updateMediaButtons();
+      return;
+    }
+    tryUnmute();
+  });
+
+  $('btn-snap').addEventListener('click', () => {
+    if (!video.videoWidth) return;
+    const c = document.createElement('canvas');
+    c.width = video.videoWidth;
+    c.height = video.videoHeight;
+    c.getContext('2d').drawImage(video, 0, 0);
+    c.toBlob((blob) => {
+      if (!blob) return;
+      const d = new Date();
+      const z = (n) => String(n).padStart(2, '0');
+      const name = 'petcam_' + d.getFullYear() + z(d.getMonth() + 1) + z(d.getDate())
+                 + '_' + z(d.getHours()) + z(d.getMinutes()) + z(d.getSeconds()) + '.png';
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = name;
+      a.target = '_blank';   // iPhone は保存できないので、開いて長押しで保存してもらう
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+    }, 'image/png');
+  });
+
+  function updateChimeButtons() {
+    for (const k of SOUND_KEYS) {
+      $('s-' + k).setAttribute('aria-pressed', String(chimeSound === k));
+    }
+    for (const k of ['low', 'high']) {
+      $('v-' + k).setAttribute('aria-pressed', String(chimeVolume === k));
+    }
+    $('btn-chime').disabled = !online;
+  }
+
+  let chimeMsgTimer = null;
+  function chimeMessage(text, kind) {
+    const el = $('chime-msg');
+    el.textContent = text;
+    el.className = 'msg' + (kind ? ' ' + kind : '');
+    clearTimeout(chimeMsgTimer);
+    if (text) chimeMsgTimer = setTimeout(() => chimeMessage(''), 5000);
+  }
+
+  $('btn-chime').addEventListener('click', () => {
+    conn.send({
+      t: 'cmd', action: 'chime',
+      sound: chimeSound, volume: VOLUMES[chimeVolume]
+    });
+    chimeMessage('鳴らしています…');
+  });
+
+  /* 選ぶと、その場で手元で鳴らす。
+     向こうの部屋で鳴らしてみるまで音が分からない、という状態にしない。 */
+  for (const k of SOUND_KEYS) {
+    $('s-' + k).addEventListener('click', () => {
+      chimeSound = k;
+      localStorage.setItem('petcam.sound', k);
+      updateChimeButtons();
+      preview.play(k, VOLUMES[chimeVolume]);
+      checkSoundSupport();
+    });
+  }
+  for (const k of ['low', 'high']) {
+    $('v-' + k).addEventListener('click', () => {
+      chimeVolume = k;
+      localStorage.setItem('petcam.volume', k);
+      updateChimeButtons();
+      preview.play(chimeSound, VOLUMES[k]);
+    });
+  }
+
+  /* カメラ端末が知らない音を選んでいないか確かめる。
+     画面の版が食い違うと「選んだ音と違う音が鳴る」ことになり、
+     原因がいちばん分かりにくい。先に気づけるようにする。 */
+  function checkSoundSupport() {
+    if (!Array.isArray(camSounds)) return;
+    if (camSounds.indexOf(chimeSound) >= 0) return;
+    chimeMessage('カメラ端末が古い画面です。あちらのページを再読み込みしてください', 'ng');
+  }
+
+  conn.on('chime_result', (m) => {
+    // 手元では音が聞こえないので、鳴ったかどうかは返事でしか分からない
+    if (m.ok) chimeMessage('鳴らしました', 'ok');
+    else chimeMessage(m.reason || '鳴らせませんでした', 'ng');
+  });
+
+  $('btn-on').addEventListener('click', () => {
+    conn.send({ t: 'cmd', action: 'camera_on' });
+    setOverlay('カメラを起動しています…');
+  });
+  $('btn-off').addEventListener('click', () => {
+    conn.send({ t: 'cmd', action: 'camera_off' });
+  });
+
+  updateChimeButtons();
+  conn.start();
+})();
+</script>
+</body>
+</html>

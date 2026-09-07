@@ -1,0 +1,190 @@
+"""サーバの動作をブラウザ抜きで確認する。
+
+  python selftest.py
+
+映像そのものは実機でしか確かめられないが、
+「認証」「状態の伝わり方」「シグナリングの中継」はここで確認できる。
+本体を直したあとに一度走らせると、壊していないか分かる。
+"""
+import http.cookiejar
+import json
+import os
+import sys
+import threading
+import time
+import urllib.parse
+import urllib.request
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import simple_websocket  # noqa: E402
+
+import server  # noqa: E402
+
+PORT = 8799
+BASE = f"http://127.0.0.1:{PORT}"
+PIN = server.CONFIG["pin"]
+fails: list[str] = []
+
+# どこかで待ち続けたまま終わらない、という止まり方を避ける
+watchdog = threading.Timer(
+    45, lambda: (print("!! 45秒を過ぎました。どこかで止まっています"), os._exit(2))
+)
+watchdog.daemon = True
+watchdog.start()
+
+
+def check(name: str, ok: bool, extra: object = "") -> None:
+    print(("  OK  " if ok else "  NG  ") + name + ("" if ok else f"   <- {extra}"))
+    if not ok:
+        fails.append(name)
+
+
+def login(pin: str) -> tuple[str, str]:
+    jar = http.cookiejar.CookieJar()
+    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+    body = urllib.parse.urlencode({"pin": pin}).encode()
+    res = opener.open(BASE + "/login", body)
+    return res.geturl(), "; ".join(f"{c.name}={c.value}" for c in jar)
+
+
+def connect(cookie: str) -> simple_websocket.Client:
+    return simple_websocket.Client(
+        f"ws://127.0.0.1:{PORT}/ws", headers={"Cookie": cookie}
+    )
+
+
+def wait_for(client, kind: str, timeout: float = 3.0) -> dict | None:
+    """指定した種類のメッセージが来るまで読み飛ばす。"""
+    limit = time.time() + timeout
+    while time.time() < limit:
+        raw = client.receive(timeout=max(0.05, limit - time.time()))
+        if raw is None:
+            break
+        msg = json.loads(raw)
+        if msg.get("t") == kind:
+            return msg
+    return None
+
+
+def main() -> int:
+    threading.Thread(
+        target=lambda: server.app.run(host="127.0.0.1", port=PORT, threaded=True),
+        daemon=True,
+    ).start()
+    time.sleep(1.5)
+
+    print("--- 認証 ---")
+    url, _ = login("000000" if PIN != "000000" else "999999")
+    check("間違ったPINは弾かれる", "/login" in url, url)
+    url, cookie = login(PIN)
+    check("正しいPINで入れる", url.endswith("/viewer"), url)
+    try:
+        simple_websocket.Client(f"ws://127.0.0.1:{PORT}/ws")
+        check("未認証のWebSocketは拒否される", False, "つながってしまった")
+    except Exception:
+        check("未認証のWebSocketは拒否される", True)
+
+    print("--- 総当たり対策 ---")
+    wrong = "000000" if PIN != "000000" else "999999"
+    for _ in range(server.FAIL_LIMIT):
+        login(wrong)
+    url, _ = login(wrong)
+    check("続けて外すと締め出される", "/login" in url, url)
+    body = urllib.request.urlopen(BASE + "/login").read().decode("utf-8")
+    check("締め出し中はその旨が出る", "受け付けません" in body)
+    url, _ = login(PIN)
+    check("締め出し中は正しいPINでも入れない", "/login" in url, url)
+    server.clear_failures("127.0.0.1")
+    url, cookie = login(PIN)
+    check("解除されれば入れる", url.endswith("/viewer"), url)
+
+    print("--- 状態 ---")
+    viewer = connect(cookie)
+    check("welcomeが来る", json.loads(viewer.receive(timeout=3))["t"] == "welcome")
+    st = json.loads(viewer.receive(timeout=3))
+    check("カメラ未接続なら OFFLINE", st["online"] is False, st)
+    viewer.send(json.dumps({"t": "join", "role": "viewer"}))
+    wait_for(viewer, "state")
+
+    cam = connect(cookie)
+    cam.receive(timeout=3)
+    cam.receive(timeout=3)
+    cam.send(json.dumps({"t": "join", "role": "camera"}))
+    st = wait_for(viewer, "state")
+    check("カメラ接続で ONLINE になる", bool(st and st["online"]), st)
+
+    invite = wait_for(cam, "new_viewer")
+    check("カメラへ視聴者が知らされる", invite is not None, invite)
+    if invite is None:
+        return 1
+
+    cam.send(json.dumps({"t": "camera_state", "state": "on"}))
+    st = wait_for(viewer, "state")
+    check("CAMERA ON が視聴側へ伝わる", bool(st and st["camera"] == "on"), st)
+
+    cam.send(json.dumps({
+        "t": "camera_state", "state": "on", "sounds": ["chime", "call", "melody"]
+    }))
+    st = wait_for(viewer, "state")
+    check(
+        "カメラが鳴らせる音の一覧が伝わる",
+        bool(st and st.get("sounds") == ["chime", "call", "melody"]),
+        st,
+    )
+
+    print("--- 遠隔操作 ---")
+    viewer.send(json.dumps({"t": "cmd", "action": "camera_off"}))
+    cmd = wait_for(cam, "cmd")
+    check("CAMERA OFF の指示がカメラへ届く", bool(cmd and cmd["action"] == "camera_off"), cmd)
+    viewer.send(json.dumps({
+        "t": "cmd", "action": "chime", "sound": "melody", "volume": 0.65
+    }))
+    cmd = wait_for(cam, "cmd")
+    check("音を鳴らす指示が種類と音量ごと届く",
+          bool(cmd and cmd.get("sound") == "melody" and abs(cmd.get("volume", 0) - 0.65) < 0.01),
+          cmd)
+    viewer.send(json.dumps({"t": "cmd", "action": "chime", "sound": "melody"}))
+    res = wait_for(viewer, "chime_result", timeout=2.0)
+    check("続けて押すと抑えられ、その旨が返る",
+          bool(res and res.get("ok") is False), res)
+    viewer.send(json.dumps({"t": "cmd", "action": "reboot"}))
+    check("知らない指示は無視される", wait_for(cam, "cmd", timeout=1.0) is None)
+    cam.send(json.dumps({"t": "cmd", "action": "camera_off"}))
+    check("カメラ側からの指示は流れない", wait_for(cam, "cmd", timeout=1.0) is None)
+
+    print("--- つなぎ直しの要求 ---")
+    viewer.send(json.dumps({"t": "sync", "force": True}))
+    inv = wait_for(cam, "new_viewer")
+    check("force付きの要求がカメラへ伝わる", bool(inv and inv.get("force") is True), inv)
+    viewer.send(json.dumps({"t": "sync"}))
+    inv = wait_for(cam, "new_viewer")
+    check("force無しの要求は force=False で届く", bool(inv and inv.get("force") is False), inv)
+
+    print("--- シグナリングの中継 ---")
+    cam.send(json.dumps({"t": "offer", "to": invite["sid"], "sdp": {"sdp": "X"}}))
+    offer = wait_for(viewer, "offer")
+    check("offer が視聴側へ届く", bool(offer and offer["sdp"]["sdp"] == "X"), offer)
+    check("offer に送信元が付く", bool(offer and offer.get("from")), offer)
+
+    viewer.send(json.dumps({"t": "answer", "to": offer["from"], "sdp": {"sdp": "Y"}}))
+    ans = wait_for(cam, "answer")
+    check("answer がカメラ側へ戻る", bool(ans and ans["sdp"]["sdp"] == "Y"), ans)
+
+    viewer.send(json.dumps({"t": "ice", "to": offer["from"], "candidate": {"c": "Z"}}))
+    ice = wait_for(cam, "ice")
+    check("ICE が中継される", bool(ice and ice["candidate"]["c"] == "Z"), ice)
+
+    print("--- 切断 ---")
+    cam.close()
+    st = wait_for(viewer, "state", timeout=4)
+    check("カメラ切断で OFFLINE に戻る", bool(st and st["online"] is False), st)
+    check("そのとき CAMERA も OFF に戻る", bool(st and st["camera"] == "off"), st)
+    viewer.close()
+
+    print()
+    print("結果: " + ("全て通過" if not fails else f"{len(fails)}件 失敗 -> {fails}"))
+    return 1 if fails else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

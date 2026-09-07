@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pet Camera — ログイン</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<div class="wrap" style="max-width:360px;padding-top:64px">
+  <h1>Pet Camera</h1>
+  <div class="card">
+    <form method="post" action="{{ url_for('login', next=next) }}">
+      <div class="label" style="margin-bottom:10px">PIN</div>
+      <input type="tel" name="pin" inputmode="numeric" autocomplete="off"
+             maxlength="32" autofocus required>
+      {% if error %}<div class="err">{{ error }}</div>{% endif %}
+      <button class="primary wide" type="submit"
+              style="width:100%;margin-top:14px">ログイン</button>
+    </form>
+  </div>
+  <p class="note">PINはサーバを起動したコンソールに表示されています。</p>
+</div>
+</body>
+</html>

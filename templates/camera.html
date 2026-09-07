@@ -1,0 +1,462 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pet Camera — カメラ端末</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<div class="wrap">
+  <h1>Pet Camera — Device</h1>
+
+  <div class="card">
+    <div class="row">
+      <span class="label">CONNECTION</span>
+      <span class="val"><i class="dot" id="d-conn"></i><span id="t-conn">CONNECTING</span></span>
+    </div>
+    <div class="row">
+      <span class="label">CAMERA</span>
+      <span class="val"><i class="dot" id="d-cam"></i><span id="t-cam">OFF</span></span>
+    </div>
+    <div class="row">
+      <span class="label">VIEWERS</span>
+      <span class="val" id="t-viewers">0</span>
+    </div>
+  </div>
+
+  <div class="stage">
+    <video id="local" autoplay playsinline muted></video>
+  </div>
+
+  <div class="buttons">
+    <button class="primary" id="btn-start">CAMERA ON</button>
+    <button id="btn-stop" disabled>CAMERA OFF</button>
+    <button class="wide" id="btn-sleep" disabled>画面を消す（配信は続く）</button>
+  </div>
+
+  <div class="card" style="margin-top:14px">
+    <div class="label" style="margin-bottom:8px">画質</div>
+    <div class="seg">
+      <button id="q-normal" aria-pressed="true">標準</button>
+      <button id="q-eco" aria-pressed="false">省電力</button>
+    </div>
+    <p class="sub">
+      標準 1280×720 / 24fps ・ 省電力 640×480 / 15fps<br>
+      省電力は発熱と電池の減りを抑えます。切り替えると映像が数秒途切れます。
+    </p>
+
+    <div class="label" style="margin:16px 0 8px">音声</div>
+    <div class="seg">
+      <button id="a-off" aria-pressed="true">なし</button>
+      <button id="a-on" aria-pressed="false">あり</button>
+    </div>
+    <p class="sub">
+      部屋の音を拾って一緒に送ります。鳴き声や物音を確認したいときに。<br>
+      電池の減りが少し増えます。
+    </p>
+
+    <div class="label" style="margin:16px 0 8px">使うカメラ</div>
+    <div class="seg">
+      <button id="f-back" aria-pressed="true">背面</button>
+      <button id="f-front" aria-pressed="false">前面</button>
+    </div>
+    <p class="sub">背面は画質が良く、前面は画面と同じ向きなので置き場所を決めやすい。</p>
+  </div>
+
+  <div class="err" id="error" hidden></div>
+
+  <p class="note">
+    この端末をペットのいる場所に置いてください。<br>
+    ・<b>最初に一度だけ CAMERA ON を押して、カメラの使用を許可してください。</b><br>
+    　一度許可すれば、以後はPC側から遠隔でON/OFFできます<br>
+    ・電源につないだままにする<br>
+    ・画面は1分で自動的に消えます（配信は続きます。触ると戻ります）<br>
+    ・他のアプリに切り替えるとカメラは止まります
+  </p>
+</div>
+
+<div id="sleep" hidden>
+  <div>
+    <div class="live">● 配信中</div>
+    画面をタップすると表示に戻ります
+  </div>
+</div>
+
+<script src="{{ url_for('static', filename='conn.js') }}"></script>
+<script src="{{ url_for('static', filename='sounds.js') }}"></script>
+<script>
+(function () {
+  const $ = (id) => document.getElementById(id);
+  const video = $('local');
+  const errBox = $('error');
+  const sleepEl = $('sleep');
+
+  // 経路探索の設定はサーバの config.json で変えられる。
+  // 家の中だけなら空でよいが、外出先から見るには自分の見え方を知る必要がある。
+  const RTC_CONFIG = { iceServers: {{ ice_servers | tojson }} };
+  const OFFER_TIMEOUT = 8000;  // これを過ぎても繋がらなければ申し込み直す
+  const SLEEP_AFTER = 60000;   // 触らなければこの時間で画面を消す
+
+  const QUALITY = {
+    normal: { width: 1280, height: 720, fps: 24 },
+    eco:    { width: 640,  height: 480, fps: 15 }
+  };
+
+  let stream = null;
+  let wakeLock = null;
+  let sleepTimer = null;
+  let quality = localStorage.getItem('petcam.quality') === 'eco' ? 'eco' : 'normal';
+  let audioOn = localStorage.getItem('petcam.audio') === 'on';
+  let facing = localStorage.getItem('petcam.facing') === 'user' ? 'user' : 'environment';
+
+  const pcs = new Map();     // 視聴者sid -> RTCPeerConnection
+  const pending = new Map(); // 相手の応答が来る前に届いたICEを溜めておく
+  const offerAt = new Map(); // 視聴者sid -> 最後に接続を申し込んだ時刻
+  const genOf = new Map();   // 視聴者sid -> 申し込みの通し番号
+
+  const conn = new Conn('camera');
+
+  /* 映像がつながらないときの原因調べ。
+     どんな経路の候補を出し合い、どこで止まったのかをサーバの記録に残す。
+     出しすぎると記録が埋まるので上限を設ける。 */
+  let diagLeft = 60;
+  function diag(text) {
+    if (diagLeft-- <= 0) return;
+    conn.send({ t: 'diag', text: String(text).slice(0, 200) });
+  }
+  function briefCandidate(c) {
+    if (!c) return '(終了)';
+    // 相手から届いた候補はただのデータなので、種類などの項目が無い。
+    // 元の文字列を読んで補う（candidate:... 1 udp 優先度 アドレス ポート typ 種類）
+    const p = (c.candidate || '').split(' ');
+    const type = c.type || (p[6] === 'typ' ? p[7] : '?');
+    const proto = c.protocol || p[2] || '?';
+    const addr = c.address || p[4] || '?';
+    const port = c.port || p[5] || '';
+    return [type, proto, addr, port].join(' ');
+  }
+
+
+  function setDot(el, cls) {
+    el.className = 'dot' + (cls ? ' ' + cls : '');
+  }
+
+  function showError(msg) {
+    if (!msg) { errBox.hidden = true; return; }
+    errBox.textContent = msg;
+    errBox.hidden = false;
+  }
+
+  function reportCamera(st, err) {
+    conn.send({
+      t: 'camera_state', state: st, error: err || null, audio: audioOn,
+      sounds: Object.keys(PETCAM_SOUNDS)   // 見る側が版の食い違いに気づけるように
+    });
+    $('t-cam').textContent = st.toUpperCase();
+    setDot($('d-cam'), st === 'on' ? 'ok' : (st === 'error' ? 'err' : ''));
+    $('btn-start').disabled = (st === 'on');
+    $('btn-stop').disabled = (st !== 'on');
+    $('btn-sleep').disabled = (st !== 'on');
+  }
+
+  // ---- カメラ ----------------------------------------------------------
+  async function startCamera() {
+    if (stream) return;
+    showError('');
+    const q = QUALITY[quality];
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: { ideal: facing },
+          width:  { ideal: q.width },
+          height: { ideal: q.height },
+          frameRate: { ideal: q.fps, max: q.fps }
+        },
+        audio: audioOn
+      });
+    } catch (e) {
+      const msg = (e && e.name === 'NotAllowedError')
+        ? 'カメラの使用が許可されませんでした。ブラウザのアドレスバー左のアイコンから許可してください。'
+        : 'カメラを起動できませんでした: ' + (e && e.name ? e.name : e);
+      showError(msg);
+      reportCamera('error', msg);
+      return;
+    }
+    video.srcObject = stream;
+    sound.ensure();
+    await requestWakeLock();
+    reportCamera('on');
+    scheduleSleep();
+    // 既に見ている人がいれば、そちらへ映像を配りに行く
+    conn.send({ t: 'sync' });
+  }
+
+  function stopCamera() {
+    dropAllPeers();
+    if (stream) {
+      stream.getTracks().forEach((t) => t.stop());
+      stream = null;
+    }
+    video.srcObject = null;
+    releaseWakeLock();
+    wakeScreen();
+    clearTimeout(sleepTimer);
+    reportCamera('off');
+  }
+
+  async function restartCamera() {
+    if (!stream) return;
+    dropAllPeers();
+    stream.getTracks().forEach((t) => t.stop());
+    stream = null;
+    video.srcObject = null;
+    await startCamera();
+  }
+
+  // ---- 画質 ------------------------------------------------------------
+  function updateQualityButtons() {
+    $('q-normal').setAttribute('aria-pressed', String(quality === 'normal'));
+    $('q-eco').setAttribute('aria-pressed', String(quality === 'eco'));
+  }
+
+  async function setQuality(mode) {
+    if (quality === mode) return;
+    quality = mode;
+    localStorage.setItem('petcam.quality', mode);
+    updateQualityButtons();
+    await restartCamera();
+  }
+
+  function updateOptionButtons() {
+    $('a-on').setAttribute('aria-pressed', String(audioOn));
+    $('a-off').setAttribute('aria-pressed', String(!audioOn));
+    $('f-back').setAttribute('aria-pressed', String(facing === 'environment'));
+    $('f-front').setAttribute('aria-pressed', String(facing === 'user'));
+  }
+
+  async function setAudio(on) {
+    if (audioOn === on) return;
+    audioOn = on;
+    localStorage.setItem('petcam.audio', on ? 'on' : 'off');
+    updateOptionButtons();
+    if (!stream) { reportCamera('off'); return; }  // 停止中でも状態は伝える
+    // 音を足す・外すのはカメラの取り直しが要る
+    await restartCamera();
+  }
+
+  async function setFacing(mode) {
+    if (facing === mode) return;
+    facing = mode;
+    localStorage.setItem('petcam.facing', mode);
+    updateOptionButtons();
+    await restartCamera();
+  }
+
+  // ---- 画面を消す（配信は続ける） --------------------------------------
+  // 映像のプレビューを描き続けるのは、発熱と電池の主な原因になる。
+  // 配信そのものは止めずに、描画だけをやめる。
+  function sleepScreen() {
+    if (!stream) return;
+    sleepEl.hidden = false;
+    document.body.classList.add('sleeping');
+  }
+
+  function wakeScreen() {
+    sleepEl.hidden = true;
+    document.body.classList.remove('sleeping');
+  }
+
+  function scheduleSleep() {
+    clearTimeout(sleepTimer);
+    if (!stream) return;
+    sleepTimer = setTimeout(sleepScreen, SLEEP_AFTER);
+  }
+
+  document.addEventListener('pointerdown', () => {
+    wakeScreen();
+    scheduleSleep();
+    sound.ensure();  // 一度触っておけば、あとから遠隔で音を鳴らせる
+  });
+
+  // ---- 画面が消えるとカメラも止まるので、スリープを止める --------------
+  async function requestWakeLock() {
+    if (!('wakeLock' in navigator)) return;
+    try {
+      wakeLock = await navigator.wakeLock.request('screen');
+      wakeLock.addEventListener('release', () => { wakeLock = null; });
+    } catch (e) { /* 対応していない端末では黙って諦める */ }
+  }
+
+  function releaseWakeLock() {
+    if (wakeLock) { try { wakeLock.release(); } catch (e) {} wakeLock = null; }
+  }
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && stream) requestWakeLock();
+  });
+
+  // ---- WebRTC（映像を持っている側が offer を出す） --------------------
+  function dropPeer(sid) {
+    const pc = pcs.get(sid);
+    if (pc) { try { pc.close(); } catch (e) {} }
+    pcs.delete(sid);
+    pending.delete(sid);
+    offerAt.delete(sid);
+  }
+
+  function dropAllPeers() {
+    for (const sid of Array.from(pcs.keys())) dropPeer(sid);
+  }
+
+  function newPeer(sid) {
+    const pc = new RTCPeerConnection(RTC_CONFIG);
+    pcs.set(sid, pc);
+    stream.getTracks().forEach((track) => pc.addTrack(track, stream));
+
+    const gen = genOf.get(sid);
+    pc.onicecandidate = (ev) => {
+      if (ev.candidate) {
+        conn.send({ t: 'ice', to: sid, candidate: ev.candidate, gen: gen });
+        diag('自分の候補 ' + briefCandidate(ev.candidate));
+      } else {
+        diag('候補の洗い出し終了');
+      }
+    };
+    pc.oniceconnectionstatechange = () => diag('ICE ' + pc.iceConnectionState);
+    pc.onconnectionstatechange = () => {
+      diag('接続 ' + pc.connectionState);
+      if (['failed', 'closed'].includes(pc.connectionState)) {
+        if (pcs.get(sid) === pc) dropPeer(sid);
+      }
+    };
+    return pc;
+  }
+
+  /* force = 「今の接続は壊れているから作り直せ」という相手からの申告。
+     これが来たら、こちらの見かけ上の状態がどうであれ作り直す。
+     片側だけが切断に気づいている状態は普通に起きるので、
+     自分の状態を根拠に相手の要求を却下してはいけない。 */
+  async function offerTo(sid, force) {
+    if (!stream) return;
+
+    const prev = pcs.get(sid);
+    if (prev && !force) {
+      // 同じ相手への二重の申し込みは、あとから来た応答が食い違った接続に
+      // 当たって失敗する。進行中のものがあれば、そのまま待つ。
+      const alive = ['new', 'connecting', 'connected'].includes(prev.connectionState);
+      const fresh = Date.now() - (offerAt.get(sid) || 0) < OFFER_TIMEOUT;
+      if (prev.connectionState === 'connected' || (alive && fresh)) return;
+    }
+    dropPeer(sid);
+
+    const gen = (genOf.get(sid) || 0) + 1;
+    genOf.set(sid, gen);
+    offerAt.set(sid, Date.now());
+
+    const pc = newPeer(sid);
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    conn.send({ t: 'offer', to: sid, sdp: pc.localDescription, gen: gen });
+  }
+
+  conn.on('new_viewer', (m) => { offerTo(m.sid, !!m.force); });
+
+  // 古い申し込みへの応答が遅れて届くことがある。番号が合わないものは捨てる。
+  function isCurrent(m) {
+    return m.gen === undefined || m.gen === genOf.get(m.from);
+  }
+
+  conn.on('answer', async (m) => {
+    if (!isCurrent(m)) return;
+    const pc = pcs.get(m.from);
+    if (!pc || pc.signalingState !== 'have-local-offer') return;
+    try {
+      await pc.setRemoteDescription(m.sdp);
+    } catch (e) {
+      return;
+    }
+    const queued = pending.get(m.from) || [];
+    for (const c of queued) { try { await pc.addIceCandidate(c); } catch (e) {} }
+    pending.delete(m.from);
+  });
+
+  conn.on('ice', async (m) => {
+    if (!isCurrent(m)) return;
+    const pc = pcs.get(m.from);
+    if (!pc) return;
+    // 応答より先にICEが届くことがある。その場合は溜めておく
+    if (!pc.remoteDescription) {
+      if (!pending.has(m.from)) pending.set(m.from, []);
+      pending.get(m.from).push(m.candidate);
+      return;
+    }
+    diag('相手の候補 ' + briefCandidate(m.candidate));
+    try { await pc.addIceCandidate(m.candidate); } catch (e) {}
+  });
+
+  // ---- この端末から音を鳴らす ------------------------------------------
+  // 音の作り方は static/sounds.js にまとめてある（見る側の試聴と共通）
+  const sound = createSoundPlayer();
+
+  // ---- 視聴側からの指示 ------------------------------------------------
+  conn.on('cmd', (m) => {
+    // 手元から操作されたときの受け口。
+    // カメラは別の部屋にあるので、設定は全部ここから変えられる必要がある。
+    if (m.action === 'camera_on') startCamera();
+    else if (m.action === 'camera_off') stopCamera();
+    else if (m.action === 'audio_on') setAudio(true);
+    else if (m.action === 'audio_off') setAudio(false);
+    else if (m.action === 'chime') {
+      sound.play(m.sound, m.volume).then((err) => {
+        // 鳴ったかどうかを押した人に返す。
+        // 手元では音が聞こえないので、返事が無いと成否が分からない。
+        conn.send({ t: 'chime_result', to: m.from, ok: !err, reason: err || null });
+      });
+    }
+  });
+
+  conn.on('viewer_left', (m) => { dropPeer(m.sid); });
+
+  // ---- 接続状態 --------------------------------------------------------
+  conn.on('open', () => {
+    $('t-conn').textContent = 'CONNECTED';
+    setDot($('d-conn'), 'ok');
+    if (stream) {
+      // ここで映像の接続を作り直さない。
+      // 通信が切れている間も映像そのものは生きていることが多く、
+      // 毎回作り直すと、そのたびに数秒映像が途切れる。
+      // 映像が届いているかを知っているのは視聴側なので、
+      // 壊れていれば向こうから force 付きで作り直しを頼んでくる。
+      reportCamera('on');
+      conn.send({ t: 'sync' });
+    }
+  });
+
+  conn.on('close', () => {
+    $('t-conn').textContent = 'DISCONNECTED';
+    setDot($('d-conn'), 'err');
+  });
+
+  conn.on('state', (m) => { $('t-viewers').textContent = m.viewers; });
+
+  $('btn-start').addEventListener('click', startCamera);
+  $('btn-stop').addEventListener('click', stopCamera);
+  $('q-normal').addEventListener('click', () => setQuality('normal'));
+  $('q-eco').addEventListener('click', () => setQuality('eco'));
+  $('a-on').addEventListener('click', () => setAudio(true));
+  $('a-off').addEventListener('click', () => setAudio(false));
+  $('f-back').addEventListener('click', () => setFacing('environment'));
+  $('f-front').addEventListener('click', () => setFacing('user'));
+  $('btn-sleep').addEventListener('click', () => {
+    clearTimeout(sleepTimer);
+    setTimeout(sleepScreen, 150);  // このタップで起こし直さないよう少し待つ
+  });
+  updateQualityButtons();
+  updateOptionButtons();
+
+  conn.start();
+})();
+</script>
+</body>
+</html>

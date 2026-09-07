@@ -1,0 +1,2 @@
+# .bat は cmd が読むので CP932 + CRLF のまま扱う。Git に変換させない
+*.bat -text

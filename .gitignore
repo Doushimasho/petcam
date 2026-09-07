@@ -1,0 +1,7 @@
+config.json
+certs/
+__pycache__/
+*.pyc
+petcam.log*
+docs/iphone_setup.md
+*.log
