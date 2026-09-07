@@ -40,24 +40,34 @@ Androidを推奨するのは、iPhoneをカメラにすると画面ロックや�
 
 ---
 
+## AIに手伝ってもらう
+
+ClaudeやChatGPTを使っているなら、[`AI_SETUP.md`](AI_SETUP.md) をAIに読ませると
+対話しながら導入できる。つまずきやすい点と、やってはいけないこと
+（PINを外に出さない等）も書いてあるので、AIがそこを外さない。
+
+```
+https://github.com/Doushimasho/petcam の AI_SETUP.md を読んで、
+ペットカメラの導入を手伝ってください。
+```
+
+---
+
 ## 1. サーバを動かす（PC側）
 
-### 必要な部品を入れる（最初の1回だけ）
+### Windows
+
+**`start.bat` をダブルクリックするだけ。**
+必要な部品は自動で入る。Pythonが無ければその場で案内が出る。
+
+### macOS / Linux
 
 ```bash
 pip install -r requirements.txt
-```
-
-Python 3.10以上と、`Flask` `simple-websocket` `cryptography` が要る。
-
-### 起動する
-
-Windowsなら `start.bat` をダブルクリック。
-それ以外なら次を実行する。
-
-```bash
 python server.py
 ```
+
+Python 3.10以上が要る。入るのは `Flask` `simple-websocket` `cryptography` の3つ。
 
 黒い画面に、**PIN** と **アクセスするアドレス** が表示される。
 
@@ -312,7 +322,8 @@ STUNは「自分が外からどう見えるか」を答えるだけで、映像�
 
 ```
 petcam/
-├ start.bat        起動用（Windows・ダブルクリック）
+├ start.bat        起動用（Windows・ダブルクリック。部品も自動で入る）
+├ AI_SETUP.md      AIに読ませて導入を手伝ってもらうためのファイル
 ├ server.py        サーバ本体
 ├ make_cert.py     自己署名証明書を作る
 ├ ts_cert.py       Tailscaleの正式な証明書を取る・更新する
