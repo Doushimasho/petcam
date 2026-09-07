@@ -45,15 +45,39 @@ iPhoneをカメラにするのは勧めません。画面ロックやアプリ�
 
 ---
 
-## 手順1：PCに置く
+## 手順1：PCの準備
+
+### Pythonが入っているか確認する
+
+コマンドプロンプト（またはターミナル）で次を実行します。
+
+```bash
+python --version
+```
+
+`Python 3.10.0` 以上と表示されればOKです。
+「認識されていません」と出たら [python.org](https://www.python.org/downloads/) から入れてください。
+Windowsでインストールするときは、最初の画面の
+**「Add python.exe to PATH」にチェックを入れる**のを忘れずに。
+
+### コードを取ってくる
 
 ```bash
 git clone （リポジトリのURL）
 cd petcam
+```
+
+Gitを使っていない場合は、GitHubのページの緑色の **Code** ボタン →
+**Download ZIP** でも構いません。展開したフォルダに移動してください。
+
+### 必要な部品を入れる
+
+```bash
 pip install -r requirements.txt
 ```
 
-Python 3.10以上が要ります。入れるのは `Flask` `simple-websocket` `cryptography` の3つだけです。
+入るのは `Flask` `simple-websocket` `cryptography` の3つだけです。
+数十秒で終わります。
 
 ## 手順2：起動する
 
@@ -138,6 +162,28 @@ https://端末名.ネットワーク名.ts.net:8443/viewer
 
 家族に見せたい場合は、管理画面の **Users** から招待リンクを送れば、
 相手は自分のアカウントのままで参加できます。
+
+---
+
+## 動いているか確かめる
+
+映像以外の部分が壊れていないかを、機械的に確認できます。
+
+```bash
+python selftest.py
+```
+
+認証、締め出し、状態の伝わり方、遠隔操作、つなぎ直し、音の指示など
+26項目を確認します。全部 `OK` になれば、少なくとも壊れてはいません。
+
+## 更新するとき
+
+```bash
+git pull
+```
+
+サーバを起動し直せば反映されます。
+**PINや証明書は `config.json` と `certs/` に入っていて、更新では消えません。**
 
 ---
 
@@ -230,3 +276,232 @@ JavaScriptがキャッシュされていたこと、そして
 **リポジトリ：（ここにURL）**
 
 READMEに、この記事より詳しい手順とトラブル対応をまとめてあります。
+
+---
+---
+
+# (English) Turning a Spare Phone into a Pet Camera
+
+I wanted to check on my cat while away from home. Instead of buying a pet camera,
+I used an Android phone that had been sitting unused in a drawer.
+
+- **Free.** No cloud service, no subscription
+- **Viewers only need a browser.** No app to install
+- **The camera phone only needs a browser too.** No app to build
+- **Works from outside your home** without exposing your house to the internet
+- Latency is 0.1–0.3 seconds
+
+The code is open source, so you can build the same thing.
+It works as a **pet camera or a baby/family monitor**.
+
+## What it does
+
+| | |
+|---|---|
+| Live video | 0.1–0.3s latency |
+| Remote on/off | Start and stop the camera from your phone or PC |
+| Audio | Listen to the room. Toggled remotely |
+| Chime | Play a sound from the camera phone to get their attention |
+| Snapshot | Save the current frame |
+| Quality | Standard / Power-saving |
+| Screen off | The camera phone goes dark while still streaming |
+| Auto-recovery | If video stalls, it reconnects itself in about 10 seconds |
+
+## What you need
+
+- **An Android phone** to act as the camera (Chrome is all it needs)
+- **A PC** (Windows / macOS / Linux) to run the server
+- Both on the same Wi-Fi
+
+Do not use an iPhone as the camera. iOS stops the camera when the screen locks
+or you switch apps. **Viewing on an iPhone is fine.**
+
+## Step 1: Prepare the PC
+
+Check that Python is installed:
+
+```bash
+python --version
+```
+
+You need 3.10 or newer. If it is missing, get it from
+[python.org](https://www.python.org/downloads/).
+On Windows, check **"Add python.exe to PATH"** on the first installer screen.
+
+Get the code:
+
+```bash
+git clone （repository URL）
+cd petcam
+pip install -r requirements.txt
+```
+
+Only three packages are installed: `Flask`, `simple-websocket`, `cryptography`.
+
+## Step 2: Start the server
+
+On Windows, double-click `start.bat`. Otherwise:
+
+```bash
+python server.py
+```
+
+A console window shows your **PIN** and the **addresses to open**:
+
+```
+============================================================
+  PET CAMERA server started
+============================================================
+  PIN            : 123456789012
+
+  Phone (camera) : https://192.168.x.x:8443/camera
+  PC (viewer)    : https://192.168.x.x:8443/viewer
+============================================================
+```
+
+**Leave this window open.** Closing it stops the camera.
+
+The first time, your OS will ask for network permission.
+On Windows, **check "Private networks" and allow it** — otherwise your phone
+cannot reach the PC.
+
+The PIN is generated randomly on first run. It is not in the source code.
+
+## Step 3: Set up the camera phone
+
+1. Connect the phone to **the same Wi-Fi as the PC** (not a guest network)
+2. Open the `/camera` address in Chrome
+3. You will see "Your connection is not private"
+   → **Advanced → Proceed** (this warning is expected; step 5 removes it)
+4. Enter the PIN
+5. **Press CAMERA ON and allow camera access**
+
+**You only grant camera permission once.** After that you can turn the camera
+on and off remotely.
+
+### Placement tips
+
+Heat and battery are what actually cause trouble:
+
+| | Why |
+|---|---|
+| Keep it plugged in | Required |
+| Lowest screen brightness | The main source of heat and power draw |
+| Remove the case | Helps it stay cool over long periods |
+| Silence notifications | An incoming call covers the page and stops the camera |
+| Lock screen rotation | Keeps the picture the right way up |
+
+The screen goes black after 1 minute without touch, **while streaming continues**.
+Drawing the preview is the main power cost, so only the drawing stops.
+
+## Step 4: View it
+
+Open `/viewer` in a browser, enter the same PIN. That is all.
+Any number of people can watch at once.
+
+## Step 5: Watch from outside your home
+
+This is the part that sounds hard but is not.
+
+Rather than exposing your home to the internet, use **Tailscale** — it connects
+only your own devices to each other, and it is free for personal use.
+
+1. Install Tailscale on **the PC**, **the camera phone**, and **the device you
+   will watch from**, signing in with the same account
+2. In the admin console, enable **DNS → HTTPS Certificates**
+3. Restart the server
+
+The server then obtains a **real HTTPS certificate** automatically, and you get
+an address like:
+
+```
+https://your-pc-name.your-network.ts.net:8443/viewer
+```
+
+**The same URL works at home and away, with no certificate warning.**
+Certificates expire after 90 days but renew themselves before that.
+
+To let a family member watch, send them an invite from the **Users** page.
+They join with their own account.
+
+## Checking that it works
+
+```bash
+python selftest.py
+```
+
+This checks 26 things — authentication, lockout, state propagation, remote
+commands, reconnection, chime delivery. Video itself can only be tested on a
+real device.
+
+## Updating
+
+```bash
+git pull
+```
+
+Restart the server. **Your PIN and certificates live in `config.json` and
+`certs/`, and are not touched by updates.**
+
+## The three things that trip people up
+
+I hit all of them.
+
+**1. Forgetting to install Tailscale on the camera phone**
+
+This fails in the most confusing way possible. The status shows
+`DEVICE ONLINE` and `CAMERA ON` correctly, but **no video arrives.**
+
+Video does not travel through the server — the two devices talk directly.
+Reaching the server is not enough; the viewer must reach the camera phone.
+
+**2. Android battery optimisation**
+
+Settings → Apps → Tailscale → Battery → **"Unrestricted"**.
+Otherwise Android quietly kills the VPN to save power. It works at home and
+fails from outside.
+
+**3. Being on a guest network**
+
+Guest networks block device-to-device traffic, so nothing connects.
+
+## What was actually hard
+
+Not WebRTC. **The failures were quiet ones.**
+
+**Clicking the console window killed the server.** On Windows, clicking a
+console window puts it into selection mode, which blocks output — and blocks
+the program trying to write it. The server froze while printing its startup
+message. Selection mode is now disabled and logs go to a file.
+
+**Fixing one bug created another.** I added a rule to avoid duplicate connection
+offers. That rule then refused legitimate reconnections, so a brief Wi-Fi drop
+left the video dead forever — the camera side still believed it was connected.
+**One side always notices a disconnect before the other.** Now a peer that
+reports being broken is always believed, and a watchdog checks whether video is
+actually advancing rather than trusting status flags.
+
+**The wrong sound played.** Choosing "melody" played the chime instead. The
+camera page was running an older version that did not know the new sound, and
+it silently substituted the default. JavaScript was also being cached because
+the no-cache rule matched `application/javascript` but the files were served as
+`text/javascript`. It now returns an error instead of substituting.
+
+Three lessons:
+
+> Never reject a peer's request based on your own view of the state.
+>
+> Put the switch where the person using it can reach it.
+>
+> Never silently substitute something else.
+
+## Try it
+
+If you have a spare phone in a drawer, it costs nothing to try, and the phone
+goes back to normal afterwards.
+
+**Repository: （URL here）**
+
+The README has more detail than this article, including troubleshooting.
+
+Licensed under MIT.
