@@ -37,6 +37,21 @@
     <button id="btn-snap" disabled>スナップショット</button>
   </div>
 
+  <div class="card" style="margin-top:14px">
+    <div class="row" style="border:0; padding:0 0 8px">
+      <span class="label">自動スタンバイ</span>
+      <span class="val" id="t-standby">—</span>
+    </div>
+    <div class="seg">
+      <button id="sb-on">する</button>
+      <button id="sb-off">しない</button>
+    </div>
+    <p class="sub">
+      誰も見ていない状態が1分続くと、カメラを止めて電池と発熱を抑えます。<br>
+      この画面を開けば自動で起き上がります（1〜3秒）。
+    </p>
+  </div>
+
   <div class="card" id="zoom-card" style="margin-top:14px" hidden>
     <div class="row" style="border:0; padding:0 0 8px">
       <span class="label">ズーム</span>
@@ -129,6 +144,8 @@
   let chimeVolume = localStorage.getItem('petcam.volume');
   let camSounds = null;   // カメラ端末が知っている音の一覧
   let camZoom = null;     // ズームの範囲と現在の倍率（非対応なら null）
+  let camStandby = null;  // 自動スタンバイが有効か
+  let camState = 'off';   // off / on / standby / error
   if (SOUND_KEYS.indexOf(chimeSound) < 0) chimeSound = 'chime';
   if (!(chimeVolume in VOLUMES)) chimeVolume = 'low';
 
@@ -324,22 +341,38 @@
     setDot($('d-online'), m.online ? 'ok' : '');
 
     online = !!m.online;
-    camOn = (m.camera === 'on');
+    camState = m.camera || 'off';
+    camOn = (camState === 'on');
+    camStandby = (typeof m.standby === 'boolean') ? m.standby : null;
     camAudio = !!m.audio;
     camSounds = Array.isArray(m.sounds) ? m.sounds : null;
     camZoom = (m.zoom && typeof m.zoom.max === 'number') ? m.zoom : null;
-    $('t-cam').textContent = (m.camera || 'off').toUpperCase();
-    setDot($('d-cam'), camOn ? 'ok' : (m.camera === 'error' ? 'err' : ''));
+    $('t-cam').textContent =
+      camState === 'standby' ? 'STANDBY' : camState.toUpperCase();
+    setDot($('d-cam'), camOn ? 'ok' : (camState === 'error' ? 'err' : ''));
+
+    $('t-standby').textContent =
+      camStandby === null ? '—' : (camStandby ? 'する' : 'しない');
+    $('sb-on').setAttribute('aria-pressed', String(camStandby === true));
+    $('sb-off').setAttribute('aria-pressed', String(camStandby === false));
+    $('sb-on').disabled = !m.online;
+    $('sb-off').disabled = !m.online;
 
     if (m.error) { errBox.textContent = m.error; errBox.hidden = false; }
     else { errBox.hidden = true; }
 
-    $('btn-on').disabled = !m.online || camOn;
-    $('btn-off').disabled = !m.online || !camOn;
+    // ボタンは「利用者が望んでいる状態」で決める。
+    // 待機中はカメラが止まっているが、望まれている状態はONのまま。
+    const wantOn = (camState === 'on' || camState === 'standby');
+    $('btn-on').disabled = !m.online || wantOn;
+    $('btn-off').disabled = !m.online || !wantOn;
 
     if (!m.online) {
       closePeer();
       setOverlay('カメラ端末が接続されていません');
+    } else if (camState === 'standby') {
+      closePeer();
+      setOverlay('カメラを起こしています…');
     } else if (!camOn) {
       closePeer();
       setOverlay('カメラは停止中です');
@@ -352,11 +385,24 @@
     updateZoom();
   });
 
+  /* この画面を見ているかどうかを申告する。
+     裏に回っているのに見ている扱いにすると、
+     誰も見ていないのにカメラが動き続けることになる。 */
+  function reportWatching() {
+    conn.send({ t: 'watching', on: document.visibilityState === 'visible' });
+  }
+  document.addEventListener('visibilitychange', reportWatching);
+
   conn.on('open', () => {
-    // ここでは何も作り直さない。
-    // 映像が届いているならそのまま使い続ければよく、
+    // 映像は作り直さない。届いているならそのまま使い続ければよく、
     // 止まっていれば下の見張りが気づいて作り直しを頼む。
+    reportWatching();
   });
+
+  $('sb-on').addEventListener('click', () =>
+    conn.send({ t: 'cmd', action: 'standby_on' }));
+  $('sb-off').addEventListener('click', () =>
+    conn.send({ t: 'cmd', action: 'standby_off' }));
 
   conn.on('close', () => {
     $('t-online').textContent = 'OFFLINE';

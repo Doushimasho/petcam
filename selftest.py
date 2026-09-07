@@ -152,6 +152,28 @@ def main() -> int:
     cam.send(json.dumps({"t": "cmd", "action": "camera_off"}))
     check("カメラ側からの指示は流れない", wait_for(cam, "cmd", timeout=1.0) is None)
 
+    print("--- 自動スタンバイ ---")
+    viewer.send(json.dumps({"t": "watching", "on": False}))
+    st = wait_for(viewer, "state")
+    check("画面を裏に回すと見ている人が減る",
+          bool(st and st.get("watchers") == 0 and st.get("viewers") == 1), st)
+    viewer.send(json.dumps({"t": "watching", "on": True}))
+    st = wait_for(viewer, "state")
+    check("戻すと見ている人に数え直される",
+          bool(st and st.get("watchers") == 1), st)
+    cam.send(json.dumps({"t": "camera_state", "state": "standby", "standby": True}))
+    st = wait_for(viewer, "state")
+    check("待機中であることが視聴側へ伝わる",
+          bool(st and st.get("camera") == "standby" and st.get("standby") is True), st)
+    viewer.send(json.dumps({"t": "cmd", "action": "standby_off"}))
+    cmd = wait_for(cam, "cmd")
+    check("自動スタンバイの切替がカメラへ届く",
+          bool(cmd and cmd["action"] == "standby_off"), cmd)
+    cam.send(json.dumps({"t": "camera_state", "state": "on", "standby": False}))
+    st = wait_for(viewer, "state")
+    check("切ったことが視聴側へ伝わる",
+          bool(st and st.get("standby") is False), st)
+
     print("--- ズーム ---")
     cam.send(json.dumps({
         "t": "camera_state", "state": "on",

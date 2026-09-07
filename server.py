@@ -48,6 +48,8 @@ def load_config() -> dict:
         # 映像の経路を探すためのサーバ。
         # 自分が外からどう見えているかを教えてもらうだけで、映像は通らない。
         # 家の中だけで使うなら空にしてよい。
+        # 誰も見ていない状態がこの秒数続いたら、カメラを止める
+        "standby_after_sec": 60,
         "ice_servers": [
             {"urls": "stun:stun.l.google.com:19302"},
             {"urls": "stun:stun.cloudflare.com:3478"},
@@ -91,6 +93,9 @@ class Peer:
         self.sid = sid
         self.ws = ws
         self.role: str | None = None
+        # 画面を開いていても、裏に回っていれば見ていないものとして数える。
+        # カメラを動かし続けるかどうかの判断に使う。
+        self.watching = True
         self._lock = threading.Lock()
 
     def send(self, obj: dict) -> None:
@@ -111,13 +116,14 @@ state = {
     "audio": False,
     "sounds": None,   # カメラ端末が知っている音の名前
     "zoom": None,     # ズームの範囲と現在の倍率（非対応なら None）
+    "standby": True,  # 誰も見ていないときカメラを止めるか
     "last_chime": 0.0,
 }
 
 
 def snapshot() -> dict:
     with _lock:
-        viewers = sum(1 for p in peers.values() if p.role == "viewer")
+        viewers = [p for p in peers.values() if p.role == "viewer"]
         return {
             "t": "state",
             "online": state["camera_sid"] is not None,
@@ -126,7 +132,10 @@ def snapshot() -> dict:
             "audio": state["audio"],
             "sounds": state["sounds"],
             "zoom": state["zoom"],
-            "viewers": viewers,
+            "standby": state["standby"],
+            "viewers": len(viewers),
+            # 実際に画面を見ている人の数。カメラを動かすかどうかはこれで決める
+            "watchers": sum(1 for p in viewers if p.watching),
         }
 
 
@@ -268,7 +277,11 @@ def logout():
 def camera():
     if not authed():
         return redirect(url_for("login", next="/camera"))
-    return render_template("camera.html", ice_servers=CONFIG.get("ice_servers", []))
+    return render_template(
+        "camera.html",
+        ice_servers=CONFIG.get("ice_servers", []),
+        standby_after_sec=CONFIG.get("standby_after_sec", 60),
+    )
 
 
 @app.route("/viewer")
@@ -317,6 +330,14 @@ def handle_message(peer: Peer, msg: dict) -> None:
         out.pop("to", None)
         out["from"] = peer.sid
         send_to(to, out)
+    elif t == "watching":
+        # 画面が手前にあるかどうか。裏に回ったら、見ていない扱いにする。
+        if peer.role != "viewer":
+            return
+        want = bool(msg.get("on"))
+        if peer.watching != want:
+            peer.watching = want
+            broadcast_state()
     elif t == "camera_state":
         with _lock:
             if state["camera_sid"] != peer.sid:
@@ -327,6 +348,8 @@ def handle_message(peer: Peer, msg: dict) -> None:
             got = msg.get("sounds")
             if isinstance(got, list):
                 state["sounds"] = [str(x)[:16] for x in got[:10]]
+            if "standby" in msg:
+                state["standby"] = bool(msg.get("standby"))
             z = msg.get("zoom")
             if isinstance(z, dict):
                 try:
@@ -344,7 +367,8 @@ def handle_message(peer: Peer, msg: dict) -> None:
             return
         action = msg.get("action")
         if action not in (
-            "camera_on", "camera_off", "audio_on", "audio_off", "chime", "zoom"
+            "camera_on", "camera_off", "audio_on", "audio_off", "chime", "zoom",
+            "standby_on", "standby_off",
         ):
             return
         out = {"t": "cmd", "action": action, "from": peer.sid}

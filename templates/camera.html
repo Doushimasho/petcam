@@ -105,6 +105,16 @@
 
   let stream = null;
   let wakeLock = null;
+
+  /* 利用者が望んでいる状態と、いま実際に映しているかは別物。
+     「動かしたい（desired='on'）が、見ている人がいないので止めている」
+     という状態があるので、両方を持つ必要がある。 */
+  let desired = 'off';
+  let autoStandby = localStorage.getItem('petcam.standby') !== 'off';
+  let watchers = 0;
+  let standbyTimer = null;
+  // 誰も見なくなってから止めるまでの猶予（config.json で変えられる）
+  const STANDBY_AFTER = {{ standby_after_sec | int }} * 1000;
   let sleepTimer = null;
   let quality = localStorage.getItem('petcam.quality') === 'eco' ? 'eco' : 'normal';
   let audioOn = localStorage.getItem('petcam.audio') === 'on';
@@ -186,17 +196,22 @@
     conn.send({
       t: 'camera_state', state: st, error: err || null, audio: audioOn,
       sounds: Object.keys(PETCAM_SOUNDS),  // 見る側が版の食い違いに気づけるように
-      zoom: (st === 'on') ? zoomInfo() : null
+      zoom: (st === 'on') ? zoomInfo() : null,
+      standby: autoStandby
     });
-    $('t-cam').textContent = st.toUpperCase();
+    $('t-cam').textContent =
+      st === 'standby' ? 'STANDBY（待機中）' : st.toUpperCase();
     setDot($('d-cam'), st === 'on' ? 'ok' : (st === 'error' ? 'err' : ''));
-    $('btn-start').disabled = (st === 'on');
-    $('btn-stop').disabled = (st !== 'on');
+    $('btn-start').disabled = (desired === 'on');
+    $('btn-stop').disabled = (desired !== 'on');
     $('btn-sleep').disabled = (st !== 'on');
   }
 
   // ---- カメラ ----------------------------------------------------------
-  async function startCamera() {
+  /* openStream / closeStream は「実際に映すかどうか」だけを扱う。
+     利用者の意思（desired）はここでは変えない。
+     待機からの復帰で意思を書き換えてしまわないようにするため。 */
+  async function openStream() {
     if (stream) return;
     showError('');
     const q = QUALITY[quality];
@@ -227,17 +242,74 @@
     conn.send({ t: 'sync' });
   }
 
-  function stopCamera() {
+  function closeStream() {
     dropAllPeers();
     if (stream) {
       stream.getTracks().forEach((t) => t.stop());
       stream = null;
     }
     video.srcObject = null;
-    releaseWakeLock();
     wakeScreen();
     clearTimeout(sleepTimer);
+  }
+
+  // ---- 利用者の意思 ----------------------------------------------------
+  async function startCamera() {
+    desired = 'on';
+    clearTimeout(standbyTimer);
+    standbyTimer = null;
+    await openStream();
+    updateStandby();
+  }
+
+  function stopCamera() {
+    desired = 'off';
+    clearTimeout(standbyTimer);
+    standbyTimer = null;
+    closeStream();
+    releaseWakeLock();
     reportCamera('off');
+  }
+
+  /* 見ている人がいないあいだ、カメラを止めておく。
+
+     画面のスリープ止めは解除しない。画面が消えるとページごと止められ、
+     手元から起こせなくなるため。撮影と圧縮と描画を止めるだけでも、
+     消費の大部分は落ちる。 */
+  function enterStandby() {
+    standbyTimer = null;
+    closeStream();
+    reportCamera('standby');
+  }
+
+  function updateStandby() {
+    if (desired !== 'on') return;
+
+    if (!autoStandby) {
+      clearTimeout(standbyTimer);
+      standbyTimer = null;
+      if (!stream) openStream();
+      return;
+    }
+
+    if (watchers > 0) {
+      clearTimeout(standbyTimer);
+      standbyTimer = null;
+      if (!stream) openStream();      // 見に来た人がいるので起こす
+    } else if (stream && !standbyTimer) {
+      // すぐ止めると、画面を切り替えただけで止まってしまう。少し待つ。
+      standbyTimer = setTimeout(enterStandby, STANDBY_AFTER);
+    }
+  }
+
+  async function setAutoStandby(on) {
+    if (autoStandby === on) return;
+    autoStandby = on;
+    localStorage.setItem('petcam.standby', on ? 'on' : 'off');
+    updateStandby();
+    if (stream) reportCamera('on');
+    else if (desired === 'on') reportCamera('standby');
+    else reportCamera('off');
   }
 
   async function restartCamera() {
@@ -246,7 +318,7 @@
     stream.getTracks().forEach((t) => t.stop());
     stream = null;
     video.srcObject = null;
-    await startCamera();
+    await openStream();
   }
 
   // ---- 画質 ------------------------------------------------------------
@@ -443,6 +515,8 @@
     else if (m.action === 'audio_on') setAudio(true);
     else if (m.action === 'audio_off') setAudio(false);
     else if (m.action === 'zoom') applyZoom(m.value);
+    else if (m.action === 'standby_on') setAutoStandby(true);
+    else if (m.action === 'standby_off') setAutoStandby(false);
     else if (m.action === 'chime') {
       sound.play(m.sound, m.volume).then((err) => {
         // 鳴ったかどうかを押した人に返す。
@@ -466,6 +540,8 @@
       // 壊れていれば向こうから force 付きで作り直しを頼んでくる。
       reportCamera('on');
       conn.send({ t: 'sync' });
+    } else if (desired === 'on') {
+      reportCamera('standby');
     }
   });
 
@@ -474,7 +550,12 @@
     setDot($('d-conn'), 'err');
   });
 
-  conn.on('state', (m) => { $('t-viewers').textContent = m.viewers; });
+  conn.on('state', (m) => {
+    $('t-viewers').textContent =
+      (m.watchers === m.viewers) ? m.viewers : `${m.watchers} / ${m.viewers}`;
+    watchers = m.watchers || 0;
+    updateStandby();
+  });
 
   $('btn-start').addEventListener('click', startCamera);
   $('btn-stop').addEventListener('click', stopCamera);
