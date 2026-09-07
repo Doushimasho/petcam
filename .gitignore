@@ -5,3 +5,4 @@ __pycache__/
 petcam.log*
 docs/iphone_setup.md
 *.log
+docs/x_posts.md
