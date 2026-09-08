@@ -103,18 +103,20 @@
     eco:    { width: 640,  height: 480, fps: 15 },
     // 見張り専用。誰も見ていないとき用の、いちばん軽い設定。
     // 検知は 96x54 まで縮めて見るので、この解像度で十分足りる。
-    watch:  { width: 320,  height: 240, fps: 5 }
+    watch:  { width: 320,  height: 240, fps: 5 },
+    // 録画するとき用。あとで見返すので、検知専用よりは残す。
+    record: { width: 640,  height: 480, fps: 10 }
   };
 
   /* 画質ごとの送信量の上限。
      決めないとブラウザが勝手に高めに取るので、圧縮と電波を余計に使う。 */
-  const BITRATE = { normal: 1200000, eco: 500000, watch: 150000 };
+  const BITRATE = { normal: 1200000, eco: 500000, watch: 150000, record: 400000 };
 
   /* いま実際に使う画質。
      誰も見ていないのに高画質で撮り続ける理由はない。
      見張りだけのときは、検知に足りる最低限まで落とす。 */
   function effectiveQuality() {
-    if (detectOn && watchers === 0) return 'watch';
+    if (detectOn && watchers === 0) return recordOn ? 'record' : 'watch';
     return quality;
   }
 
@@ -232,6 +234,7 @@
       zoom: (st === 'on') ? zoomInfo() : null,
       standby: autoStandby,
       detect: detectOn,
+      record: recordOn,
       battery: battery,
       quality: usingQuality
     });
@@ -271,6 +274,7 @@
     }
     video.srcObject = stream;
     usingQuality = effectiveQuality();
+    startRecorder();
     sound.ensure();
     await requestWakeLock();
     reportCamera('on');
@@ -280,6 +284,7 @@
   }
 
   function closeStream() {
+    stopRecorder();
     dropAllPeers();
     if (stream) {
       stream.getTracks().forEach((t) => t.stop());
@@ -588,6 +593,95 @@
     try { await pc.addIceCandidate(m.candidate); } catch (e) {}
   });
 
+  // ---- 見張って録画する ------------------------------------------------
+  /* 区画に入った瞬間から録り始めても、肝心の「入るところ」が写らない。
+     そこで、常に直近の数秒を手元に持っておき、
+     反応があった時点でそこから遡って1本にまとめる。
+
+     まとめた動画はPCへ送る。スマホに溜めると容量を圧迫するうえ、
+     あとから取り出すのが面倒になる。 */
+  const PREROLL_SEC = 8;      // 何秒前まで遡るか
+  const TAIL_SEC = 5;         // 出ていったあと何秒まで録るか
+  const MAX_EVENT_SEC = 90;   // 1本の上限。居座られても際限なく伸ばさない
+  const CHUNK_MS = 1000;
+
+  let recordOn = localStorage.getItem('petcam.record') !== 'off';
+  let recorder = null;
+  let recHeader = null;   // 先頭の塊。これが無いと再生できない
+  let recRing = [];       // 直近のぶん
+  let recEvent = null;    // いま記録中の出来事
+
+  function startRecorder() {
+    if (recorder || !stream || !recordOn || !detectOn) return;
+    const types = ['video/webm;codecs=vp8', 'video/webm'];
+    const mt = types.find((t) => window.MediaRecorder
+                              && MediaRecorder.isTypeSupported(t));
+    if (!mt) return;
+    try {
+      recorder = new MediaRecorder(stream, { mimeType: mt });
+    } catch (e) {
+      recorder = null;
+      return;
+    }
+    recHeader = null;
+    recRing = [];
+    recorder.ondataavailable = (ev) => {
+      if (!ev.data || !ev.data.size) return;
+      if (!recHeader) { recHeader = ev.data; return; }
+      recRing.push(ev.data);
+      while (recRing.length > PREROLL_SEC) recRing.shift();
+      if (recEvent) {
+        recEvent.chunks.push(ev.data);
+        if (recEvent.chunks.length >= MAX_EVENT_SEC) finishEvent();
+      }
+    };
+    try { recorder.start(CHUNK_MS); } catch (e) { recorder = null; }
+  }
+
+  function stopRecorder() {
+    if (recEvent) finishEvent();
+    if (recorder) {
+      try { recorder.stop(); } catch (e) {}
+      recorder = null;
+    }
+    recHeader = null;
+    recRing = [];
+  }
+
+  function beginEvent(zoneId) {
+    if (recEvent || !recorder || !recordOn) return;
+    // 直近のぶんを種にして始める。これで入ってくるところが残る。
+    recEvent = { zone: zoneId, chunks: recRing.slice(), tail: null };
+  }
+
+  function endEvent() {
+    if (!recEvent || recEvent.tail) return;
+    // 出た直後に切ると、去り際が写らない。少し延ばしてから閉じる。
+    recEvent.tail = setTimeout(finishEvent, TAIL_SEC * 1000);
+  }
+
+  function finishEvent() {
+    const ev = recEvent;
+    recEvent = null;
+    if (!ev) return;
+    clearTimeout(ev.tail);
+    if (!recHeader || !ev.chunks.length) return;
+    const blob = new Blob([recHeader].concat(ev.chunks), { type: 'video/webm' });
+    const url = '/recording?zone=' + encodeURIComponent(ev.zone)
+              + '&seconds=' + ev.chunks.length;
+    fetch(url, { method: 'POST', body: blob, credentials: 'same-origin' })
+      .catch(() => {});
+  }
+
+  function setRecord(on) {
+    if (recordOn === on) return;
+    recordOn = on;
+    localStorage.setItem('petcam.record', on ? 'on' : 'off');
+    if (on) startRecorder(); else stopRecorder();
+    updateQualityForWatchers();
+    reportCamera(stream ? 'on' : (desired === 'on' ? 'standby' : 'off'));
+  }
+
   // ---- 決めた場所を見張る ----------------------------------------------
   /* ケージの「トイレ」「エサ場」のように、映像の中の決まった場所を見張る。
 
@@ -681,12 +775,16 @@
       // いまの判定を続ける理由があるか。
       // 出入りで別のしきい値を使い、しばらく続いて初めて切り替える。
       // そうしないと、境目でちらついて何度も出入りしたことになる。
+      const wasBusy = st.busy;
       const stay = st.busy ? (score > EXIT_SCORE) : (score <= ENTER_SCORE);
       if (stay) {
         st.since = now;
       } else if (now - st.since >= (st.busy ? EXIT_MS : ENTER_MS)) {
         st.busy = !st.busy;
         st.since = now;
+      }
+      if (st.busy !== wasBusy) {
+        if (st.busy) beginEvent(z.id); else endEvent();
       }
       busy[z.id] = st.busy;
       /* 何か目立つものが写っているあいだは、その区画の基準を覚え直さない。
@@ -758,9 +856,13 @@
       setAutoStandby(false);
       startCamera();
       detTimer = setInterval(detectTick, DET_INTERVAL);
-    } else if (standbyBeforeDetect !== null) {
-      setAutoStandby(standbyBeforeDetect);
-      standbyBeforeDetect = null;
+      startRecorder();
+    } else {
+      stopRecorder();
+      if (standbyBeforeDetect !== null) {
+        setAutoStandby(standbyBeforeDetect);
+        standbyBeforeDetect = null;
+      }
     }
     reportCamera(stream ? 'on' : (desired === 'on' ? 'standby' : 'off'));
   }
@@ -784,6 +886,8 @@
     else if (m.action === 'detect_off') setDetect(false);
     else if (m.action === 'detect_reset') resetBackground();
     else if (m.action === 'detect_preview') previewOn = !!m.value;
+    else if (m.action === 'record_on') setRecord(true);
+    else if (m.action === 'record_off') setRecord(false);
     else if (m.action === 'chime') {
       sound.play(m.sound, m.volume).then((err) => {
         // 鳴ったかどうかを押した人に返す。

@@ -56,6 +56,20 @@
       <button id="dt-off">しない</button>
     </div>
 
+    <div class="row" style="border:0; padding:10px 0 8px">
+      <span class="label">見つけたら録画</span>
+      <span class="val" id="t-record">—</span>
+    </div>
+    <div class="seg">
+      <button id="rc-on">する</button>
+      <button id="rc-off">しない</button>
+    </div>
+    <p class="sub">
+      区画に入った<b>8秒前から</b>記録します。出ていって5秒後まで。<br>
+      録画は<a href="/recordings" style="color:var(--accent)">録画一覧</a>で見られます。<br>
+      録画するときは、あとで見返せるように画質を少し上げます（640×480）。
+    </p>
+
     <div class="label" style="margin:16px 0 8px">見張る場所と反応</div>
     <div id="zone-list"></div>
     <div class="seg" style="margin-top:10px">
@@ -147,6 +161,7 @@
     ボタンが押せないときは、カメラ端末が接続されていません。<br>
     カメラ端末側で最初に一度 CAMERA ON を押して許可を済ませておく必要があります。<br>
     映像が止まったときは自動でつなぎ直します。<br>
+    <a href="/recordings" style="color:var(--dim)">録画一覧</a> ・
     「音を聞く」を押すとカメラ端末が音を拾い始めます（数秒かかります）。<br>
     スナップショットはiPhoneでは画像が開くので、長押しで保存してください。
     <a href="/logout" style="color:var(--dim)">ログアウト</a>
@@ -449,6 +464,13 @@
     $('zn-litter').disabled = !m.online;
     $('zn-food').disabled = !m.online;
     $('dt-reset').disabled = !m.online || camDetect !== true;
+
+    const rec = (typeof m.record === 'boolean') ? m.record : null;
+    $('t-record').textContent = rec === null ? '—' : (rec ? 'する' : 'しない');
+    $('rc-on').setAttribute('aria-pressed', String(rec === true));
+    $('rc-off').setAttribute('aria-pressed', String(rec === false));
+    $('rc-on').disabled = !m.online;
+    $('rc-off').disabled = !m.online;
     renderZoneList();
     drawZones();
 
@@ -746,6 +768,11 @@
     localStorage.setItem('petcam.advanced', advancedOpen ? 'on' : 'off');
     applyAdvanced();
   });
+
+  $('rc-on').addEventListener('click', () =>
+    conn.send({ t: 'cmd', action: 'record_on' }));
+  $('rc-off').addEventListener('click', () =>
+    conn.send({ t: 'cmd', action: 'record_off' }));
 
   $('dt-reset').addEventListener('click', () => {
     conn.send({ t: 'cmd', action: 'detect_reset' });
