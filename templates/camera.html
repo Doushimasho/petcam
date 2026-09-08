@@ -106,6 +106,10 @@
     watch:  { width: 320,  height: 240, fps: 5 }
   };
 
+  /* 画質ごとの送信量の上限。
+     決めないとブラウザが勝手に高めに取るので、圧縮と電波を余計に使う。 */
+  const BITRATE = { normal: 1200000, eco: 500000, watch: 150000 };
+
   /* いま実際に使う画質。
      誰も見ていないのに高画質で撮り続ける理由はない。
      見張りだけのときは、検知に足りる最低限まで落とす。 */
@@ -132,6 +136,7 @@
   let facing = localStorage.getItem('petcam.facing') === 'user' ? 'user' : 'environment';
 
   const pcs = new Map();     // 視聴者sid -> RTCPeerConnection
+  const watchingSids = new Set();  // いま実際に画面を見ている人
   const pending = new Map(); // 相手の応答が来る前に届いたICEを溜めておく
   const offerAt = new Map(); // 視聴者sid -> 最後に接続を申し込んだ時刻
   const genOf = new Map();   // 視聴者sid -> 申し込みの通し番号
@@ -448,6 +453,42 @@
   });
 
   // ---- WebRTC（映像を持っている側が offer を出す） --------------------
+  /* 相手ごとに、送るか送らないかと、送る量の上限を決める。
+
+     画面を開いていても裏に回っている相手には、送っても見られない。
+     映像は相手ごとに別々に圧縮しているので、送るのをやめれば
+     そのぶん圧縮の手間も電波も丸ごと減る。
+     接続そのものは残すので、見に戻ってきたらすぐ再開できる。 */
+  function applySendState(sid) {
+    const pc = pcs.get(sid);
+    if (!pc || !pc.getSenders) return;
+    const active = watchingSids.has(sid);
+    const cap = BITRATE[effectiveQuality()] || BITRATE.eco;
+    for (const sender of pc.getSenders()) {
+      if (!sender.track || sender.track.kind !== 'video') continue;
+      let params;
+      try { params = sender.getParameters(); } catch (e) { continue; }
+      if (!params.encodings || !params.encodings.length) params.encodings = [{}];
+      params.encodings[0].active = active;
+      params.encodings[0].maxBitrate = cap;
+      /* 帯域が足りないとき、解像度を落とすのではなくコマ数を落とす。
+         ペットの様子を見るのに大事なのは滑らかさより細かさで、
+         送信を止めて再開したあと、粗い絵から戻るのを待たずに済む。 */
+      params.degradationPreference = 'maintain-resolution';
+      sender.setParameters(params).catch(() => {});
+    }
+  }
+
+  function applyAllSendStates() {
+    for (const sid of pcs.keys()) applySendState(sid);
+  }
+
+  conn.on('viewer_watching', (m) => {
+    if (m.on) watchingSids.add(m.sid);
+    else watchingSids.delete(m.sid);
+    applySendState(m.sid);
+  });
+
   function dropPeer(sid) {
     const pc = pcs.get(sid);
     if (pc) { try { pc.close(); } catch (e) {} }
@@ -508,6 +549,7 @@
     const pc = newPeer(sid);
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
+    applySendState(sid);
     conn.send({ t: 'offer', to: sid, sdp: pc.localDescription, gen: gen });
   }
 
@@ -791,6 +833,7 @@
     }
     updateStandby();
     updateQualityForWatchers();
+    applyAllSendStates();
   });
 
   $('btn-start').addEventListener('click', startCamera);

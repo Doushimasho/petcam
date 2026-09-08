@@ -362,6 +362,14 @@
       }
     }
     if (!camOn) { lastProgressAt = Date.now(); return; }
+    /* 裏に回っているあいだは見張らない。
+       見ていない相手には映像を送らない作りにしたので、
+       ここで「止まった」と判断すると、見てもいないのに
+       延々とつなぎ直しを要求してしまう。 */
+    if (document.visibilityState !== 'visible') {
+      lastProgressAt = Date.now();
+      return;
+    }
     // 映像は届いているが再生が止められているだけなら、接続の問題ではない。
     // ここで作り直すと、タップ待ちのまま延々と繋ぎ直すことになる。
     if (video.srcObject && video.paused) { lastProgressAt = Date.now(); return; }

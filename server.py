@@ -360,13 +360,17 @@ def handle_join(peer: Peer, msg: dict) -> None:
             state["error"] = None
             waiting = [p.sid for p in peers.values() if p.role == "viewer"]
         # 既に見ている人がいれば、その全員へ接続を張りに行かせる
+        with _lock:
+            watching = {p.sid: p.watching for p in peers.values() if p.role == "viewer"}
         for v in waiting:
             peer.send({"t": "new_viewer", "sid": v})
+            peer.send({"t": "viewer_watching", "sid": v, "on": watching.get(v, True)})
     else:
         with _lock:
             cam = state["camera_sid"]
         if cam:
             send_to(cam, {"t": "new_viewer", "sid": peer.sid})
+            send_to(cam, {"t": "viewer_watching", "sid": peer.sid, "on": peer.watching})
     broadcast_state()
 
 
@@ -414,6 +418,12 @@ def handle_message(peer: Peer, msg: dict) -> None:
         want = bool(msg.get("on"))
         if peer.watching != want:
             peer.watching = want
+            # カメラ端末には「誰が」見ているかまで伝える。
+            # 見ていない相手への送信を止めれば、そのぶん圧縮も電波も要らない。
+            with _lock:
+                cam = state["camera_sid"]
+            if cam:
+                send_to(cam, {"t": "viewer_watching", "sid": peer.sid, "on": want})
             broadcast_state()
     elif t == "camera_state":
         with _lock:
