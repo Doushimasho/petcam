@@ -163,6 +163,8 @@ state = {
     "zoom": None,     # ズームの範囲と現在の倍率（非対応なら None）
     "standby": True,  # 誰も見ていないときカメラを止めるか
     "detect": False,  # 見張りを動かしているか
+    "battery": None,  # カメラ端末の電池（残量と充電中か）
+    "quality": None,  # いま使っている画質
     "last_chime": 0.0,
 }
 
@@ -180,6 +182,8 @@ def snapshot() -> dict:
             "zoom": state["zoom"],
             "standby": state["standby"],
             "detect": state["detect"],
+            "battery": state["battery"],
+            "quality": state["quality"],
             "zones": zones,
             "viewers": len(viewers),
             # 実際に画面を見ている人の数。カメラを動かすかどうかはこれで決める
@@ -395,7 +399,12 @@ def handle_message(peer: Peer, msg: dict) -> None:
             if state["camera_sid"] != peer.sid:
                 return
             targets = [p for p in peers.values() if p.role == "viewer"]
-        out = {"t": "detect", "scores": msg.get("scores"), "busy": msg.get("busy")}
+        out = {
+            "t": "detect",
+            "scores": msg.get("scores"),
+            "busy": msg.get("busy"),
+            "image": msg.get("image"),   # 検知が何を見ているかの縮小画像
+        }
         for v in targets:
             v.send(out)
     elif t == "watching":
@@ -420,6 +429,16 @@ def handle_message(peer: Peer, msg: dict) -> None:
                 state["standby"] = bool(msg.get("standby"))
             if "detect" in msg:
                 state["detect"] = bool(msg.get("detect"))
+            b = msg.get("battery")
+            if isinstance(b, dict):
+                try:
+                    state["battery"] = {
+                        "level": int(b["level"]), "charging": bool(b["charging"])
+                    }
+                except (KeyError, TypeError, ValueError):
+                    pass
+            q = msg.get("quality")
+            state["quality"] = str(q)[:16] if q else None
             z = msg.get("zoom")
             if isinstance(z, dict):
                 try:
@@ -439,9 +458,12 @@ def handle_message(peer: Peer, msg: dict) -> None:
         if action not in (
             "camera_on", "camera_off", "audio_on", "audio_off", "chime", "zoom",
             "standby_on", "standby_off", "detect_on", "detect_off",
+            "detect_reset", "detect_preview",
         ):
             return
         out = {"t": "cmd", "action": action, "from": peer.sid}
+        if action == "detect_preview":
+            out["value"] = bool(msg.get("value"))
         if action == "zoom":
             try:
                 out["value"] = float(msg.get("value"))
@@ -514,6 +536,8 @@ def on_close(peer: Peer) -> None:
             state["sounds"] = None
             state["zoom"] = None
             state["detect"] = False
+            state["battery"] = None
+            state["quality"] = None
         cam = state["camera_sid"]
     if peer.role == "viewer" and cam:
         send_to(cam, {"t": "viewer_left", "sid": peer.sid})

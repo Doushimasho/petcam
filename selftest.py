@@ -152,6 +152,16 @@ def main() -> int:
     cam.send(json.dumps({"t": "cmd", "action": "camera_off"}))
     check("カメラ側からの指示は流れない", wait_for(cam, "cmd", timeout=1.0) is None)
 
+    cam.send(json.dumps({
+        "t": "camera_state", "state": "on",
+        "battery": {"level": 47, "charging": False}, "quality": "watch",
+    }))
+    st = wait_for(viewer, "state")
+    check("電池の状態が視聴側へ伝わる",
+          bool(st and st.get("battery", {}).get("level") == 47
+               and st["battery"]["charging"] is False), st)
+    check("いま使っている画質が伝わる", bool(st and st.get("quality") == "watch"), st)
+
     print("--- 見張る区画 ---")
     # 実際に使っている区画設定を壊さないよう、控えを取って最後に戻す
     zones_file = server.ZONES_FILE

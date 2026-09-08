@@ -23,6 +23,10 @@
       <span class="label">SOUND</span>
       <span class="val"><i class="dot" id="d-audio"></i><span id="t-audio">OFF</span></span>
     </div>
+    <div class="row">
+      <span class="label">BATTERY</span>
+      <span class="val"><i class="dot" id="d-batt"></i><span id="t-batt">—</span></span>
+    </div>
   </div>
 
   <div class="stage" id="stage">
@@ -36,8 +40,12 @@
     <button id="btn-off" disabled>CAMERA OFF</button>
     <button id="btn-audio" disabled>音を出す</button>
     <button id="btn-snap" disabled>スナップショット</button>
+    <button class="wide" id="btn-chime" disabled>♪ 音を鳴らす</button>
   </div>
 
+  <button id="btn-advanced" style="width:100%; margin-top:14px">設定を開く</button>
+
+  <div id="advanced" hidden>
   <div class="card" style="margin-top:14px">
     <div class="row" style="border:0; padding:0 0 8px">
       <span class="label">見張り</span>
@@ -55,9 +63,28 @@
       <button id="zn-food">エサ場の範囲</button>
     </div>
     <div class="hint" id="zone-hint" hidden></div>
+
+    <button id="dt-reset" style="width:100%; margin-top:10px" disabled>
+      いまの景色を「普通」として覚え直す
+    </button>
     <p class="sub">
-      ボタンを押してから、映像の上をなぞって範囲を囲みます。<br>
-      反応の数字は、何もいないときとの差です。大きいほど「何かいる」。<br>
+      <b>猫がいない状態で押してください。</b>
+      見張りは「覚えた景色との違い」を見ています。
+      覚えたときに猫が写っていると、判定が逆になります。
+    </p>
+
+    <div class="label" style="margin:16px 0 8px">検知が見ているもの</div>
+    <img id="detect-view" alt="" hidden
+         style="width:100%; image-rendering:pixelated; border-radius:8px;
+                border:1px solid var(--line); background:#000">
+    <p class="sub" id="detect-view-note">
+      橙色に塗られた点が「変わった」と判断した場所です。<br>
+      猫がいるのに塗られないなら、覚え直しが要ります。
+    </p>
+
+    <p class="sub">
+      範囲はボタンを押してから、映像の上をなぞって囲みます。<br>
+      数字は<b>その範囲の何%が変わったか</b>です。<br>
       見張っているあいだ、自動スタンバイは止まります。
     </p>
   </div>
@@ -93,10 +120,7 @@
   </div>
 
   <div class="card" style="margin-top:14px">
-    <div class="label" style="margin-bottom:8px">カメラ端末から音を鳴らす</div>
-    <button class="primary" id="btn-chime" style="width:100%" disabled>♪ 音を鳴らす</button>
-
-    <div class="label" style="margin:16px 0 8px">音の種類（押すと手元で試聴）</div>
+    <div class="label" style="margin-bottom:8px">音の種類（押すと手元で試聴）</div>
     <div class="seg3">
       <button id="s-chime" aria-pressed="true">チャイム</button>
       <button id="s-call" aria-pressed="false">呼びかけ</button>
@@ -114,6 +138,7 @@
       カメラを置いた端末のスピーカーから鳴ります。<br>
       端末の音量が下がっていると聞こえません。
     </p>
+  </div>
   </div>
 
   <div class="err" id="error" hidden></div>
@@ -176,6 +201,7 @@
   let zoneScores = {};    // 区画ごとの反応値
   let zoneBusy = {};      // 区画ごとの「いる/いない」
   let drawingFor = null;  // いま範囲を指定しようとしている区画のid
+  let detectImage = null; // 検知が見ているものの縮小画像
   const ZONE_NAMES = { litter: 'トイレ', food: 'エサ場' };
   if (SOUND_KEYS.indexOf(chimeSound) < 0) chimeSound = 'chime';
   if (!(chimeVolume in VOLUMES)) chimeVolume = 'low';
@@ -376,6 +402,21 @@
     camOn = (camState === 'on');
     camStandby = (typeof m.standby === 'boolean') ? m.standby : null;
     camDetect = (typeof m.detect === 'boolean') ? m.detect : null;
+
+    /* 電池の状態。常設なので、充電が外れていても誰も気づけない。
+       減っているのに充電されていない、が一目で分かるようにする。 */
+    const b = m.battery;
+    if (b && typeof b.level === 'number') {
+      const q = m.quality === 'watch' ? '・省電力で待機'
+              : (m.quality === 'eco' ? '・省電力' : '');
+      $('t-batt').textContent =
+        b.level + '%' + (b.charging ? '・充電中' : '・充電なし') + q;
+      setDot($('d-batt'),
+        b.charging ? 'ok' : (b.level <= 20 ? 'err' : ''));
+    } else {
+      $('t-batt').textContent = '—';
+      setDot($('d-batt'), '');
+    }
     camZones = Array.isArray(m.zones) ? m.zones : [];
     camAudio = !!m.audio;
     camSounds = Array.isArray(m.sounds) ? m.sounds : null;
@@ -399,6 +440,7 @@
     $('dt-off').disabled = !m.online;
     $('zn-litter').disabled = !m.online;
     $('zn-food').disabled = !m.online;
+    $('dt-reset').disabled = !m.online || camDetect !== true;
     renderZoneList();
     drawZones();
 
@@ -441,6 +483,7 @@
     // 映像は作り直さない。届いているならそのまま使い続ければよく、
     // 止まっていれば下の見張りが気づいて作り直しを頼む。
     reportWatching();
+    conn.send({ t: 'cmd', action: 'detect_preview', value: advancedOpen });
   });
 
   $('sb-on').addEventListener('click', () =>
@@ -610,7 +653,7 @@
     const ctx = cv.getContext('2d');
     ctx.clearRect(0, 0, cv.width, cv.height);
     const cr = contentRect();
-    if (cr) {
+    if (cr && advancedOpen) {
       const ox = cr.left - stage.left, oy = cr.top - stage.top;
       for (const z of camZones) {
         const x = ox + z.x * cr.width, y = oy + z.y * cr.height;
@@ -677,6 +720,32 @@
     drawZones();
   }
 
+  /* 設定を開いている間だけ、区画の枠を映像に重ねる。
+     普段見るときに枠が出しっぱなしだと、ただ邪魔になる。
+     検知の見え方の送信も、開いている間だけにする（無駄な通信を避ける）。 */
+  let advancedOpen = localStorage.getItem('petcam.advanced') === 'on';
+
+  function applyAdvanced() {
+    $('advanced').hidden = !advancedOpen;
+    $('btn-advanced').textContent = advancedOpen ? '設定を閉じる' : '設定を開く';
+    $('detect-view').hidden = !advancedOpen || !detectImage;
+    conn.send({ t: 'cmd', action: 'detect_preview', value: advancedOpen });
+    drawZones();
+  }
+
+  $('btn-advanced').addEventListener('click', () => {
+    advancedOpen = !advancedOpen;
+    localStorage.setItem('petcam.advanced', advancedOpen ? 'on' : 'off');
+    applyAdvanced();
+  });
+
+  $('dt-reset').addEventListener('click', () => {
+    conn.send({ t: 'cmd', action: 'detect_reset' });
+    $('zone-hint').hidden = false;
+    $('zone-hint').textContent = 'いまの景色を覚え直しました';
+    setTimeout(() => { if (!drawingFor) $('zone-hint').hidden = true; }, 3000);
+  });
+
   const layer = $('zone-layer');
   layer.addEventListener('pointerdown', (ev) => {
     if (!drawingFor) return;
@@ -718,6 +787,11 @@
   conn.on('detect', (m) => {
     zoneScores = m.scores || {};
     zoneBusy = m.busy || {};
+    if (m.image) {
+      detectImage = m.image;
+      $('detect-view').src = m.image;
+      $('detect-view').hidden = !advancedOpen;
+    }
     renderZoneList();
     drawZones();
   });
@@ -795,6 +869,7 @@
   });
 
   updateChimeButtons();
+  applyAdvanced();
   conn.start();
 })();
 </script>
