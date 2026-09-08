@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pet Camera — 録画</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<div class="wrap">
+  <h1>Pet Camera — 録画</h1>
+
+  <div class="card">
+    <div class="row">
+      <span class="label">本数</span>
+      <span class="val">{{ items|length }}</span>
+    </div>
+    <div class="row">
+      <span class="label">合計</span>
+      <span class="val">{{ '%.1f'|format(total_mb) }} MB</span>
+    </div>
+  </div>
+
+  {% if not items %}
+    <div class="card">
+      <p class="sub" style="margin:0">
+        まだ録画はありません。<br>
+        見る画面で「見張り」と「録画」を入にすると、
+        区画に猫が入ったときに自動で記録されます。
+      </p>
+    </div>
+  {% endif %}
+
+  {% for r in items %}
+  <div class="card">
+    <div class="row" style="border:0; padding:0 0 8px">
+      <span class="label">
+        {% if r.zone == 'litter' %}トイレ{% elif r.zone == 'food' %}エサ場
+        {% else %}{{ r.zone }}{% endif %}
+      </span>
+      <span class="val" style="font-size:13px">
+        {{ r.start.replace('T', ' ') }}
+      </span>
+    </div>
+    <video controls preload="none" playsinline
+           style="width:100%; height:auto; aspect-ratio:4/3"
+           src="{{ url_for('recording_file', name=r.file) }}"></video>
+    <div class="row" style="border:0; padding:8px 0 0">
+      <span class="sub" style="margin:0">
+        {{ '%.0f'|format(r.seconds) }}秒 ・ {{ '%.1f'|format(r.size / 1000000) }} MB
+      </span>
+      <form method="post" action="{{ url_for('recording_delete', name=r.file) }}"
+            style="margin:0">
+        <button style="min-height:36px; padding:6px 14px; font-size:12px">消す</button>
+      </form>
+    </div>
+  </div>
+  {% endfor %}
+
+  <p class="note">
+    古いものから自動で消えます（既定で200本 / 合計2GBまで）。<br>
+    上限は <code>config.json</code> の <code>recordings_keep</code> と
+    <code>recordings_keep_mb</code> で変えられます。<br>
+    <a href="/viewer" style="color:var(--dim)">映像に戻る</a>
+  </p>
+</div>
+
+<script>
+/* 継ぎ足しで作った動画には、全体の長さが書かれていない。
+   そのままだとシークバーが使えないので、いったん末尾まで飛ばして
+   ブラウザに長さを計算させ、先頭へ戻す。 */
+document.querySelectorAll('video').forEach((v) => {
+  v.addEventListener('loadedmetadata', function fix() {
+    if (v.duration !== Infinity) return;
+    v.removeEventListener('loadedmetadata', fix);
+    const back = () => {
+      v.removeEventListener('timeupdate', back);
+      v.currentTime = 0;
+    };
+    v.addEventListener('timeupdate', back);
+    v.currentTime = 1e101;
+  });
+});
+</script>
+</body>
+</html>

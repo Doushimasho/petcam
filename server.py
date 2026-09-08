@@ -10,6 +10,7 @@
 通信はブラウザ標準の WebSocket だけを使う。
 外部CDNのJavaScriptを読み込まないので、インターネットが無くてもLAN内で動く。
 """
+import datetime
 import json
 import logging
 import logging.handlers
@@ -23,7 +24,9 @@ import time
 import uuid
 from pathlib import Path
 
-from flask import Flask, redirect, render_template, request, session, url_for
+from flask import (
+    Flask, redirect, render_template, request, send_file, session, url_for
+)
 import simple_websocket
 
 import make_cert
@@ -50,6 +53,9 @@ def load_config() -> dict:
         # 家の中だけで使うなら空にしてよい。
         # 誰も見ていない状態がこの秒数続いたら、カメラを止める
         "standby_after_sec": 60,
+        # 録画の保管数と、合計の上限（MB）。古いものから消す
+        "recordings_keep": 200,
+        "recordings_keep_mb": 2000,
         "ice_servers": [
             {"urls": "stun:stun.l.google.com:19302"},
             {"urls": "stun:stun.cloudflare.com:3478"},
@@ -72,6 +78,62 @@ def load_config() -> dict:
 
 
 CONFIG = load_config()
+
+# ---- 録画の保管 --------------------------------------------------------
+# 区画に猫が入ったとき、カメラ端末が短い動画を送ってくる。
+# スマホに溜めると容量を圧迫して取り出しにくいので、こちらで預かる。
+REC_DIR = BASE / "recordings"
+REC_INDEX = REC_DIR / "index.json"
+REC_MAX_BYTES = 32 * 1024 * 1024   # 1本あたりの上限
+_rec_lock = threading.Lock()
+
+
+def rec_list() -> list[dict]:
+    if not REC_INDEX.exists():
+        return []
+    try:
+        got = json.loads(REC_INDEX.read_text(encoding="utf-8"))
+        return got if isinstance(got, list) else []
+    except ValueError:
+        return []
+
+
+def rec_save_index(items: list[dict]) -> None:
+    REC_DIR.mkdir(exist_ok=True)
+    REC_INDEX.write_text(
+        json.dumps(items, indent=1, ensure_ascii=False), encoding="utf-8"
+    )
+
+
+def rec_prune(items: list[dict]) -> list[dict]:
+    """古いものから消す。放っておくとディスクが埋まるため。"""
+    keep_n = int(CONFIG.get("recordings_keep", 200))
+    keep_mb = int(CONFIG.get("recordings_keep_mb", 2000))
+    items.sort(key=lambda r: r.get("start", ""), reverse=True)
+
+    kept, total = [], 0
+    for r in items:
+        total += r.get("size", 0)
+        over = len(kept) >= keep_n or total > keep_mb * 1024 * 1024
+        if over:
+            try:
+                (REC_DIR / r["file"]).unlink(missing_ok=True)
+            except OSError:
+                pass
+        else:
+            kept.append(r)
+    return kept
+
+
+def safe_rec_name(name: str) -> Path | None:
+    """一覧に載っているファイルだけを返す。任意のパスを読ませない。"""
+    if any(c in name for c in ("/", chr(92), ":")) or name.startswith("."):
+        return None
+    if not any(r.get("file") == name for r in rec_list()):
+        return None
+    f = REC_DIR / name
+    return f if f.exists() else None
+
 
 # ---- 見張る区画 --------------------------------------------------------
 # ケージの「トイレ」「エサ場」のように、映像の中の決まった場所を見張る。
@@ -123,6 +185,7 @@ app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 # 画面のファイルを直したら、サーバを起動し直さなくても反映されるようにする
 app.config["TEMPLATES_AUTO_RELOAD"] = True
+app.config["MAX_CONTENT_LENGTH"] = REC_MAX_BYTES + 1024 * 1024
 
 
 # ---- 接続の台帳 --------------------------------------------------------
@@ -163,6 +226,7 @@ state = {
     "zoom": None,     # ズームの範囲と現在の倍率（非対応なら None）
     "standby": True,  # 誰も見ていないときカメラを止めるか
     "detect": False,  # 見張りを動かしているか
+    "record": False,  # 見張りに引っかかったら録画するか
     "battery": None,  # カメラ端末の電池（残量と充電中か）
     "quality": None,  # いま使っている画質
     "last_chime": 0.0,
@@ -182,6 +246,7 @@ def snapshot() -> dict:
             "zoom": state["zoom"],
             "standby": state["standby"],
             "detect": state["detect"],
+            "record": state["record"],
             "battery": state["battery"],
             "quality": state["quality"],
             "zones": zones,
@@ -336,6 +401,75 @@ def camera():
     )
 
 
+@app.route("/recording", methods=["POST"])
+def upload_recording():
+    """カメラ端末から短い動画を受け取って保管する。"""
+    if not authed():
+        return "", 403
+    data = request.get_data(cache=False)
+    if not data or len(data) > REC_MAX_BYTES:
+        return "", 400
+
+    zone = str(request.args.get("zone", ""))[:16] or "unknown"
+    zone = "".join(c for c in zone if c.isalnum() or c in "-_")
+    try:
+        seconds = round(float(request.args.get("seconds", 0)), 1)
+    except ValueError:
+        seconds = 0.0
+
+    now = datetime.datetime.now()
+    name = f"{now:%Y%m%d_%H%M%S}_{zone}.webm"
+
+    with _rec_lock:
+        REC_DIR.mkdir(exist_ok=True)
+        (REC_DIR / name).write_bytes(data)
+        items = rec_list()
+        items.append({
+            "file": name,
+            "zone": zone,
+            "start": now.isoformat(timespec="seconds"),
+            "seconds": seconds,
+            "size": len(data),
+        })
+        rec_save_index(rec_prune(items))
+
+    logging.getLogger("werkzeug").info(
+        "録画を保管しました: %s (%.1f秒 / %.1fMB)", name, seconds, len(data) / 1e6
+    )
+    return "", 204
+
+
+@app.route("/recordings")
+def recordings():
+    if not authed():
+        return redirect(url_for("login"))
+    items = sorted(rec_list(), key=lambda r: r.get("start", ""), reverse=True)
+    total = sum(r.get("size", 0) for r in items)
+    return render_template("recordings.html", items=items, total_mb=total / 1e6)
+
+
+@app.route("/recordings/<name>")
+def recording_file(name: str):
+    if not authed():
+        return "", 403
+    f = safe_rec_name(name)
+    if not f:
+        return "", 404
+    return send_file(f, mimetype="video/webm", conditional=True)
+
+
+@app.route("/recordings/<name>/delete", methods=["POST"])
+def recording_delete(name: str):
+    if not authed():
+        return "", 403
+    with _rec_lock:
+        f = safe_rec_name(name)
+        if f:
+            f.unlink(missing_ok=True)
+            rec_save_index([r for r in rec_list() if r.get("file") != name])
+    return redirect(url_for("recordings"))
+
+
 @app.route("/viewer")
 def viewer():
     if not authed():
@@ -439,6 +573,8 @@ def handle_message(peer: Peer, msg: dict) -> None:
                 state["standby"] = bool(msg.get("standby"))
             if "detect" in msg:
                 state["detect"] = bool(msg.get("detect"))
+            if "record" in msg:
+                state["record"] = bool(msg.get("record"))
             b = msg.get("battery")
             if isinstance(b, dict):
                 try:
@@ -468,7 +604,7 @@ def handle_message(peer: Peer, msg: dict) -> None:
         if action not in (
             "camera_on", "camera_off", "audio_on", "audio_off", "chime", "zoom",
             "standby_on", "standby_off", "detect_on", "detect_off",
-            "detect_reset", "detect_preview",
+            "detect_reset", "detect_preview", "record_on", "record_off",
         ):
             return
         out = {"t": "cmd", "action": action, "from": peer.sid}
@@ -546,6 +682,7 @@ def on_close(peer: Peer) -> None:
             state["sounds"] = None
             state["zoom"] = None
             state["detect"] = False
+            state["record"] = False
             state["battery"] = None
             state["quality"] = None
         cam = state["camera_sid"]

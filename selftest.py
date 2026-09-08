@@ -13,6 +13,7 @@ import sys
 import threading
 import time
 import urllib.parse
+import urllib.error
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -161,6 +162,45 @@ def main() -> int:
           bool(st and st.get("battery", {}).get("level") == 47
                and st["battery"]["charging"] is False), st)
     check("いま使っている画質が伝わる", bool(st and st.get("quality") == "watch"), st)
+
+    print("--- 録画の保管 ---")
+    rec_saved = server.rec_list()
+    try:
+        body = bytes([0x1A, 0x45, 0xDF, 0xA3]) + b"x" * 500   # webm らしき中身
+        req = urllib.request.Request(
+            BASE + "/recording?zone=litter&seconds=12", data=body,
+            headers={"Cookie": cookie, "Content-Type": "video/webm"},
+        )
+        code = urllib.request.urlopen(req).status
+        check("録画の受け取りが成功する", code == 204, code)
+        items = server.rec_list()
+        check("一覧に載る", any(r["zone"] == "litter" and r["size"] == len(body)
+                              for r in items), items[-1] if items else None)
+        newest = sorted(items, key=lambda r: r["start"])[-1]
+        check("ファイルが実在する", (server.REC_DIR / newest["file"]).exists())
+
+        opener = urllib.request.build_opener()
+        opener.addheaders = [("Cookie", cookie)]
+        got = opener.open(BASE + "/recordings/" + newest["file"]).read()
+        check("保存した中身が読み出せる", got == body, len(got))
+
+        try:
+            opener.open(BASE + "/recordings/..%2Fconfig.json")
+            check("外のファイルは読ませない", False, "読めてしまった")
+        except urllib.error.HTTPError as e:
+            check("外のファイルは読ませない", e.code in (400, 403, 404), e.code)
+
+        req = urllib.request.Request(
+            BASE + "/recordings/" + newest["file"] + "/delete", data=b"",
+            headers={"Cookie": cookie},
+        )
+        urllib.request.urlopen(req)
+        check("消せる", not (server.REC_DIR / newest["file"]).exists())
+    finally:
+        for r in server.rec_list():
+            if r not in rec_saved:
+                (server.REC_DIR / r["file"]).unlink(missing_ok=True)
+        server.rec_save_index(rec_saved)
 
     print("--- 見張る区画 ---")
     # 実際に使っている区画設定を壊さないよう、控えを取って最後に戻す
