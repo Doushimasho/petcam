@@ -100,8 +100,19 @@
 
   const QUALITY = {
     normal: { width: 1280, height: 720, fps: 24 },
-    eco:    { width: 640,  height: 480, fps: 15 }
+    eco:    { width: 640,  height: 480, fps: 15 },
+    // 見張り専用。誰も見ていないとき用の、いちばん軽い設定。
+    // 検知は 96x54 まで縮めて見るので、この解像度で十分足りる。
+    watch:  { width: 320,  height: 240, fps: 5 }
   };
+
+  /* いま実際に使う画質。
+     誰も見ていないのに高画質で撮り続ける理由はない。
+     見張りだけのときは、検知に足りる最低限まで落とす。 */
+  function effectiveQuality() {
+    if (detectOn && watchers === 0) return 'watch';
+    return quality;
+  }
 
   let stream = null;
   let wakeLock = null;
@@ -126,6 +137,23 @@
   const genOf = new Map();   // 視聴者sid -> 申し込みの通し番号
 
   const conn = new Conn('camera');
+
+  /* 電池の残量と充電状況を見る側へ知らせる。
+     常設なので、充電が外れていても誰も気づけない。
+     数字が見えないと、節電の工夫が効いているかも分からない。 */
+  let battery = null;
+
+  if (navigator.getBattery) {
+    navigator.getBattery().then((b) => {
+      const report = () => {
+        battery = { level: Math.round(b.level * 100), charging: b.charging };
+        reportCamera(stream ? 'on' : (desired === 'on' ? 'standby' : 'off'));
+      };
+      b.addEventListener('levelchange', report);
+      b.addEventListener('chargingchange', report);
+      report();
+    }).catch(() => {});
+  }
 
   /* 映像がつながらないときの原因調べ。
      どんな経路の候補を出し合い、どこで止まったのかをサーバの記録に残す。
@@ -198,7 +226,9 @@
       sounds: Object.keys(PETCAM_SOUNDS),  // 見る側が版の食い違いに気づけるように
       zoom: (st === 'on') ? zoomInfo() : null,
       standby: autoStandby,
-      detect: detectOn
+      detect: detectOn,
+      battery: battery,
+      quality: usingQuality
     });
     $('t-cam').textContent =
       st === 'standby' ? 'STANDBY（待機中）' : st.toUpperCase();
@@ -215,7 +245,7 @@
   async function openStream() {
     if (stream) return;
     showError('');
-    const q = QUALITY[quality];
+    const q = QUALITY[effectiveQuality()];
     try {
       stream = await navigator.mediaDevices.getUserMedia({
         video: {
@@ -235,6 +265,7 @@
       return;
     }
     video.srcObject = stream;
+    usingQuality = effectiveQuality();
     sound.ensure();
     await requestWakeLock();
     reportCamera('on');
@@ -281,6 +312,18 @@
     standbyTimer = null;
     closeStream();
     reportCamera('standby');
+  }
+
+  let usingQuality = null;   // いま実際に使っている画質
+
+  /* 見ている人の増減で必要な画質が変わったら、撮り直す。
+     切り替えのたびに映像が数秒途切れるので、変わったときだけ行う。 */
+  function updateQualityForWatchers() {
+    if (!stream) return;
+    const want = effectiveQuality();
+    if (want === usingQuality) return;
+    usingQuality = want;
+    restartCamera();
   }
 
   function updateStandby() {
@@ -515,9 +558,10 @@
      用を足している間はほとんど動かないので、そこが取れないと意味がない。 */
   const DET_W = 96, DET_H = 54;   // ここまで縮めて見る。処理を軽くするため
   const DET_INTERVAL = 400;       // 測る間隔（ミリ秒）
-  const BG_RATE = 0.05;           // 背景を覚え直す速さ（照明の変化に追従する）
-  const ENTER_SCORE = 12, EXIT_SCORE = 8;   // 出入りの判定値（調整して決める）
-  const ENTER_MS = 3000, EXIT_MS = 5000;    // その値が続いたら確定する
+  const BG_RATE = 0.02;           // 基準を覚え直す速さ（照明の変化に追従する）
+  const DIFF_PIXEL = 18;          // この差があれば「その点は変わった」とみなす
+  const ENTER_SCORE = 15, EXIT_SCORE = 8;   // 区画の何%が変わったら出入りとみなすか
+  const ENTER_MS = 3000, EXIT_MS = 5000;    // その状態が続いたら確定する
 
   const detCanvas = document.createElement('canvas');
   detCanvas.width = DET_W;
@@ -525,6 +569,11 @@
   const detCtx = detCanvas.getContext('2d', { willReadFrequently: true });
 
   let detectOn = false;
+  let previewOn = false;
+  const prevCanvas = document.createElement('canvas');
+  prevCanvas.width = DET_W;
+  prevCanvas.height = DET_H;
+  const prevCtx = prevCanvas.getContext('2d');
   let zones = [];
   let zonesJson = '[]';
   let background = null;
@@ -559,22 +608,31 @@
 
     if (!background) { background = gray.slice(); return; }
 
+    /* どの点が基準と変わったかを、まず画面全体について出す。
+
+       区画ごとの「平均の差」ではなく「変わった点の割合」を見る。
+       平均だと、広い区画に小さな猫がいても薄まって埋もれてしまう。
+       割合なら「区画の何割が変わったか」になり、区画の大きさに左右されない。 */
+    const changed = new Uint8Array(gray.length);
+    for (let i = 0; i < gray.length; i++) {
+      changed[i] = Math.abs(gray[i] - background[i]) > DIFF_PIXEL ? 1 : 0;
+    }
+
     const scores = {};
     const busy = {};
-    const busyBoxes = [];
+    const holdBoxes = [];
     const now = Date.now();
 
     for (const z of zones) {
       const b = zoneBounds(z);
-      let sum = 0, n = 0;
+      let hit = 0, n = 0;
       for (let y = b.y0; y < b.y1; y++) {
         for (let x = b.x0; x < b.x1; x++) {
-          const i = y * DET_W + x;
-          sum += Math.abs(gray[i] - background[i]);
+          hit += changed[y * DET_W + x];
           n++;
         }
       }
-      const score = n ? sum / n : 0;
+      const score = n ? (hit / n) * 100 : 0;
       scores[z.id] = Math.round(score * 10) / 10;
 
       const st = zoneState[z.id] || (zoneState[z.id] = { busy: false, since: now });
@@ -589,16 +647,18 @@
         st.since = now;
       }
       busy[z.id] = st.busy;
-      if (st.busy) busyBoxes.push(b);
+      /* 何か目立つものが写っているあいだは、その区画の基準を覚え直さない。
+         「いる」と確定する前でも止める。確定を待っていると、
+         その間に猫が基準へ溶けてしまい、二度と気づけなくなる。 */
+      if (score > EXIT_SCORE) holdBoxes.push(b);
     }
 
-    /* 背景を覚え直す。
-       ただし「いる」と判定している区画は覚え直さない。
-       そこを更新すると、居座っている猫が背景に溶けて見えなくなる。 */
+    // 基準を少しずつ覚え直す（照明の変化に追従するため）。
+    // ただし上で押さえた区画は触らない。
     for (let y = 0; y < DET_H; y++) {
       for (let x = 0; x < DET_W; x++) {
         let skip = false;
-        for (const b of busyBoxes) {
+        for (const b of holdBoxes) {
           if (x >= b.x0 && x < b.x1 && y >= b.y0 && y < b.y1) { skip = true; break; }
         }
         if (skip) continue;
@@ -607,7 +667,39 @@
       }
     }
 
-    conn.send({ t: 'detect', scores: scores, busy: busy });
+    const out = { t: 'detect', scores: scores, busy: busy };
+    if (previewOn) out.image = buildPreview(gray, changed);
+    conn.send(out);
+  }
+
+  /* 検知が何を見ているかを、そのまま絵にして送る。
+     数字だけだと、反応しない理由が分からない。
+     変わったと判断した点を色で塗るので、見当違いの場所を見張っていたり、
+     基準がずれていたりすると、ひと目で分かる。 */
+  function buildPreview(gray, changed) {
+    const img = prevCtx.createImageData(DET_W, DET_H);
+    for (let i = 0; i < gray.length; i++) {
+      const p = i * 4;
+      if (changed[i]) {
+        img.data[p] = 255; img.data[p + 1] = 120; img.data[p + 2] = 30;
+      } else {
+        const g = Math.max(0, Math.min(255, gray[i] | 0));
+        img.data[p] = g; img.data[p + 1] = g; img.data[p + 2] = g;
+      }
+      img.data[p + 3] = 255;
+    }
+    prevCtx.putImageData(img, 0, 0);
+    try { return prevCanvas.toDataURL('image/jpeg', 0.5); } catch (e) { return null; }
+  }
+
+  /* いまの景色を「これが普通」として覚え直す。
+
+     見張りを始めた瞬間の景色を基準にするので、そのとき猫が写っていると
+     判定が反転する（いるのが普通、いないと反応する）。
+     猫がいない状態でこれを押してもらうのが、いちばん確実。 */
+  function resetBackground() {
+    background = null;
+    for (const k of Object.keys(zoneState)) delete zoneState[k];
   }
 
   function setDetect(on) {
@@ -648,6 +740,8 @@
     else if (m.action === 'standby_off') setAutoStandby(false);
     else if (m.action === 'detect_on') setDetect(true);
     else if (m.action === 'detect_off') setDetect(false);
+    else if (m.action === 'detect_reset') resetBackground();
+    else if (m.action === 'detect_preview') previewOn = !!m.value;
     else if (m.action === 'chime') {
       sound.play(m.sound, m.volume).then((err) => {
         // 鳴ったかどうかを押した人に返す。
@@ -696,6 +790,7 @@
       for (const k of Object.keys(zoneState)) delete zoneState[k];
     }
     updateStandby();
+    updateQualityForWatchers();
   });
 
   $('btn-start').addEventListener('click', startCamera);
