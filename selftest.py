@@ -152,6 +152,49 @@ def main() -> int:
     cam.send(json.dumps({"t": "cmd", "action": "camera_off"}))
     check("カメラ側からの指示は流れない", wait_for(cam, "cmd", timeout=1.0) is None)
 
+    print("--- 見張る区画 ---")
+    # 実際に使っている区画設定を壊さないよう、控えを取って最後に戻す
+    zones_file = server.ZONES_FILE
+    saved = zones_file.read_text(encoding="utf-8") if zones_file.exists() else None
+    try:
+        viewer.send(json.dumps({"t": "set_zones", "zones": [
+            {"id": "litter", "name": "トイレ", "x": 0.1, "y": 0.6, "w": 0.3, "h": 0.3}
+        ]}))
+        st = wait_for(viewer, "state")
+        check("区画の指定が保存され、全員へ配られる",
+              bool(st and st.get("zones") and st["zones"][0]["id"] == "litter"), st)
+        check("区画がファイルに残る", zones_file.exists())
+
+        before = len(st["zones"]) if st and st.get("zones") else 0
+        viewer.send(json.dumps({"t": "set_zones", "zones": [{"id": "x"}]}))
+        check("欠けた区画は受け付けない",
+              wait_for(viewer, "state", timeout=1.0) is None)
+        cam.send(json.dumps({"t": "set_zones", "zones": []}))
+        check("カメラ側からは区画を変えられない",
+              wait_for(viewer, "state", timeout=1.0) is None)
+
+        cam.send(json.dumps({
+            "t": "detect", "scores": {"litter": 42.5}, "busy": {"litter": True}
+        }))
+        got = wait_for(viewer, "detect")
+        check("反応値が視聴側へ届く",
+              bool(got and got["scores"]["litter"] == 42.5 and got["busy"]["litter"]),
+              got)
+        viewer.send(json.dumps({"t": "detect", "scores": {"litter": 1}}))
+        check("視聴側からの反応値は流れない",
+              wait_for(viewer, "detect", timeout=1.0) is None)
+
+        viewer.send(json.dumps({"t": "cmd", "action": "detect_on"}))
+        cmd = wait_for(cam, "cmd")
+        check("見張りの開始指示がカメラへ届く",
+              bool(cmd and cmd["action"] == "detect_on"), cmd)
+    finally:
+        if saved is None:
+            zones_file.unlink(missing_ok=True)
+        else:
+            zones_file.write_text(saved, encoding="utf-8")
+        server.zones = server.load_zones()
+
     print("--- 自動スタンバイ ---")
     viewer.send(json.dumps({"t": "watching", "on": False}))
     st = wait_for(viewer, "state")

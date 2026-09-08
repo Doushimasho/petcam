@@ -197,7 +197,8 @@
       t: 'camera_state', state: st, error: err || null, audio: audioOn,
       sounds: Object.keys(PETCAM_SOUNDS),  // 見る側が版の食い違いに気づけるように
       zoom: (st === 'on') ? zoomInfo() : null,
-      standby: autoStandby
+      standby: autoStandby,
+      detect: detectOn
     });
     $('t-cam').textContent =
       st === 'standby' ? 'STANDBY（待機中）' : st.toUpperCase();
@@ -502,6 +503,134 @@
     try { await pc.addIceCandidate(m.candidate); } catch (e) {}
   });
 
+  // ---- 決めた場所を見張る ----------------------------------------------
+  /* ケージの「トイレ」「エサ場」のように、映像の中の決まった場所を見張る。
+
+     猫かどうかを見分けるのではなく、「そこに何かいる」を見る。
+     カメラは固定でケージの中で動くのは猫だけなので、実質同じことになる。
+     画像認識を回すより、はるかに軽く、暗くても粘る。
+
+     前のコマとの差分ではなく、誰もいないときの背景との差を見る。
+     差分だと、トイレでじっとしている猫を見逃してしまう。
+     用を足している間はほとんど動かないので、そこが取れないと意味がない。 */
+  const DET_W = 96, DET_H = 54;   // ここまで縮めて見る。処理を軽くするため
+  const DET_INTERVAL = 400;       // 測る間隔（ミリ秒）
+  const BG_RATE = 0.05;           // 背景を覚え直す速さ（照明の変化に追従する）
+  const ENTER_SCORE = 12, EXIT_SCORE = 8;   // 出入りの判定値（調整して決める）
+  const ENTER_MS = 3000, EXIT_MS = 5000;    // その値が続いたら確定する
+
+  const detCanvas = document.createElement('canvas');
+  detCanvas.width = DET_W;
+  detCanvas.height = DET_H;
+  const detCtx = detCanvas.getContext('2d', { willReadFrequently: true });
+
+  let detectOn = false;
+  let zones = [];
+  let zonesJson = '[]';
+  let background = null;
+  let detTimer = null;
+  let standbyBeforeDetect = null;
+  const zoneState = {};   // 区画ごとの「いる/いない」と、その状態が続いた時間
+
+  function grayFrame() {
+    detCtx.drawImage(video, 0, 0, DET_W, DET_H);
+    const px = detCtx.getImageData(0, 0, DET_W, DET_H).data;
+    const g = new Float32Array(DET_W * DET_H);
+    for (let i = 0, p = 0; i < g.length; i++, p += 4) {
+      g[i] = px[p] * 0.299 + px[p + 1] * 0.587 + px[p + 2] * 0.114;
+    }
+    return g;
+  }
+
+  function zoneBounds(z) {
+    return {
+      x0: Math.max(0, Math.floor(z.x * DET_W)),
+      x1: Math.min(DET_W, Math.ceil((z.x + z.w) * DET_W)),
+      y0: Math.max(0, Math.floor(z.y * DET_H)),
+      y1: Math.min(DET_H, Math.ceil((z.y + z.h) * DET_H))
+    };
+  }
+
+  function detectTick() {
+    if (!detectOn || !stream || !video.videoWidth) return;
+
+    let gray;
+    try { gray = grayFrame(); } catch (e) { return; }
+
+    if (!background) { background = gray.slice(); return; }
+
+    const scores = {};
+    const busy = {};
+    const busyBoxes = [];
+    const now = Date.now();
+
+    for (const z of zones) {
+      const b = zoneBounds(z);
+      let sum = 0, n = 0;
+      for (let y = b.y0; y < b.y1; y++) {
+        for (let x = b.x0; x < b.x1; x++) {
+          const i = y * DET_W + x;
+          sum += Math.abs(gray[i] - background[i]);
+          n++;
+        }
+      }
+      const score = n ? sum / n : 0;
+      scores[z.id] = Math.round(score * 10) / 10;
+
+      const st = zoneState[z.id] || (zoneState[z.id] = { busy: false, since: now });
+      // いまの判定を続ける理由があるか。
+      // 出入りで別のしきい値を使い、しばらく続いて初めて切り替える。
+      // そうしないと、境目でちらついて何度も出入りしたことになる。
+      const stay = st.busy ? (score > EXIT_SCORE) : (score <= ENTER_SCORE);
+      if (stay) {
+        st.since = now;
+      } else if (now - st.since >= (st.busy ? EXIT_MS : ENTER_MS)) {
+        st.busy = !st.busy;
+        st.since = now;
+      }
+      busy[z.id] = st.busy;
+      if (st.busy) busyBoxes.push(b);
+    }
+
+    /* 背景を覚え直す。
+       ただし「いる」と判定している区画は覚え直さない。
+       そこを更新すると、居座っている猫が背景に溶けて見えなくなる。 */
+    for (let y = 0; y < DET_H; y++) {
+      for (let x = 0; x < DET_W; x++) {
+        let skip = false;
+        for (const b of busyBoxes) {
+          if (x >= b.x0 && x < b.x1 && y >= b.y0 && y < b.y1) { skip = true; break; }
+        }
+        if (skip) continue;
+        const i = y * DET_W + x;
+        background[i] += (gray[i] - background[i]) * BG_RATE;
+      }
+    }
+
+    conn.send({ t: 'detect', scores: scores, busy: busy });
+  }
+
+  function setDetect(on) {
+    if (detectOn === on) return;
+    detectOn = on;
+    background = null;
+    for (const k of Object.keys(zoneState)) delete zoneState[k];
+    clearInterval(detTimer);
+    detTimer = null;
+
+    if (on) {
+      // 見張りとスタンバイは目的が正反対。見張るあいだは止める。
+      standbyBeforeDetect = autoStandby;
+      setAutoStandby(false);
+      startCamera();
+      detTimer = setInterval(detectTick, DET_INTERVAL);
+    } else if (standbyBeforeDetect !== null) {
+      setAutoStandby(standbyBeforeDetect);
+      standbyBeforeDetect = null;
+    }
+    reportCamera(stream ? 'on' : (desired === 'on' ? 'standby' : 'off'));
+  }
+
   // ---- この端末から音を鳴らす ------------------------------------------
   // 音の作り方は static/sounds.js にまとめてある（見る側の試聴と共通）
   const sound = createSoundPlayer();
@@ -517,6 +646,8 @@
     else if (m.action === 'zoom') applyZoom(m.value);
     else if (m.action === 'standby_on') setAutoStandby(true);
     else if (m.action === 'standby_off') setAutoStandby(false);
+    else if (m.action === 'detect_on') setDetect(true);
+    else if (m.action === 'detect_off') setDetect(false);
     else if (m.action === 'chime') {
       sound.play(m.sound, m.volume).then((err) => {
         // 鳴ったかどうかを押した人に返す。
@@ -554,6 +685,16 @@
     $('t-viewers').textContent =
       (m.watchers === m.viewers) ? m.viewers : `${m.watchers} / ${m.viewers}`;
     watchers = m.watchers || 0;
+
+    // 区画が変わったときだけ背景を覚え直す。
+    // 状態は頻繁に届くので、毎回捨てていては覚えられない。
+    const next = JSON.stringify(m.zones || []);
+    if (next !== zonesJson) {
+      zonesJson = next;
+      zones = Array.isArray(m.zones) ? m.zones : [];
+      background = null;
+      for (const k of Object.keys(zoneState)) delete zoneState[k];
+    }
     updateStandby();
   });
 

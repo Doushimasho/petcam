@@ -73,6 +73,50 @@ def load_config() -> dict:
 
 CONFIG = load_config()
 
+# ---- 見張る区画 --------------------------------------------------------
+# ケージの「トイレ」「エサ場」のように、映像の中の決まった場所を見張る。
+# 位置は 0〜1 の割合で持つ。解像度や画質を変えても意味が変わらないため。
+ZONES_FILE = BASE / "zones.json"
+
+
+def load_zones() -> list[dict]:
+    if not ZONES_FILE.exists():
+        return []
+    try:
+        got = json.loads(ZONES_FILE.read_text(encoding="utf-8"))
+        return got if isinstance(got, list) else []
+    except ValueError:
+        return []
+
+
+def save_zones(zones: list[dict]) -> None:
+    ZONES_FILE.write_text(
+        json.dumps(zones, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+
+
+def clean_zones(raw) -> list[dict] | None:
+    """受け取った区画を検算する。おかしければ None。"""
+    if not isinstance(raw, list) or len(raw) > 6:
+        return None
+    out = []
+    for z in raw:
+        if not isinstance(z, dict):
+            return None
+        try:
+            item = {
+                "id": str(z["id"])[:16],
+                "name": str(z.get("name", ""))[:20],
+                "x": min(max(float(z["x"]), 0.0), 1.0),
+                "y": min(max(float(z["y"]), 0.0), 1.0),
+                "w": min(max(float(z["w"]), 0.01), 1.0),
+                "h": min(max(float(z["h"]), 0.01), 1.0),
+            }
+        except (KeyError, TypeError, ValueError):
+            return None
+        out.append(item)
+    return out
+
 app = Flask(__name__)
 app.config["SECRET_KEY"] = CONFIG["secret_key"]
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
@@ -108,6 +152,7 @@ class Peer:
 
 _lock = threading.Lock()
 peers: dict[str, Peer] = {}
+zones: list[dict] = load_zones()
 CHIME_MIN_GAP = 1.5  # 音を鳴らす指示の最短間隔（秒）
 state = {
     "camera_sid": None,
@@ -117,6 +162,7 @@ state = {
     "sounds": None,   # カメラ端末が知っている音の名前
     "zoom": None,     # ズームの範囲と現在の倍率（非対応なら None）
     "standby": True,  # 誰も見ていないときカメラを止めるか
+    "detect": False,  # 見張りを動かしているか
     "last_chime": 0.0,
 }
 
@@ -133,6 +179,8 @@ def snapshot() -> dict:
             "sounds": state["sounds"],
             "zoom": state["zoom"],
             "standby": state["standby"],
+            "detect": state["detect"],
+            "zones": zones,
             "viewers": len(viewers),
             # 実際に画面を見ている人の数。カメラを動かすかどうかはこれで決める
             "watchers": sum(1 for p in viewers if p.watching),
@@ -330,6 +378,26 @@ def handle_message(peer: Peer, msg: dict) -> None:
         out.pop("to", None)
         out["from"] = peer.sid
         send_to(to, out)
+    elif t == "set_zones":
+        # 見張る場所を決めるのは見る側。カメラ端末には触りに行かせない。
+        if peer.role != "viewer":
+            return
+        cleaned = clean_zones(msg.get("zones"))
+        if cleaned is None:
+            return
+        global zones
+        zones = cleaned
+        save_zones(zones)
+        broadcast_state()
+    elif t == "detect":
+        # カメラ端末が測った、区画ごとの反応値。見ている人へそのまま配る。
+        with _lock:
+            if state["camera_sid"] != peer.sid:
+                return
+            targets = [p for p in peers.values() if p.role == "viewer"]
+        out = {"t": "detect", "scores": msg.get("scores"), "busy": msg.get("busy")}
+        for v in targets:
+            v.send(out)
     elif t == "watching":
         # 画面が手前にあるかどうか。裏に回ったら、見ていない扱いにする。
         if peer.role != "viewer":
@@ -350,6 +418,8 @@ def handle_message(peer: Peer, msg: dict) -> None:
                 state["sounds"] = [str(x)[:16] for x in got[:10]]
             if "standby" in msg:
                 state["standby"] = bool(msg.get("standby"))
+            if "detect" in msg:
+                state["detect"] = bool(msg.get("detect"))
             z = msg.get("zoom")
             if isinstance(z, dict):
                 try:
@@ -368,7 +438,7 @@ def handle_message(peer: Peer, msg: dict) -> None:
         action = msg.get("action")
         if action not in (
             "camera_on", "camera_off", "audio_on", "audio_off", "chime", "zoom",
-            "standby_on", "standby_off",
+            "standby_on", "standby_off", "detect_on", "detect_off",
         ):
             return
         out = {"t": "cmd", "action": action, "from": peer.sid}
@@ -443,6 +513,7 @@ def on_close(peer: Peer) -> None:
             state["audio"] = False
             state["sounds"] = None
             state["zoom"] = None
+            state["detect"] = False
         cam = state["camera_sid"]
     if peer.role == "viewer" and cam:
         send_to(cam, {"t": "viewer_left", "sid": peer.sid})

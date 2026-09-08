@@ -98,3 +98,20 @@ body.sleeping #local { display: none; }
 .msg { color: var(--dim); font-size: 12px; margin-top: 10px; min-height: 1.2em; }
 .msg.ok { color: var(--ok); }
 .msg.ng { color: var(--err); }
+
+/* ---- 見張る区画 --------------------------------------------------- */
+#zone-layer {
+  position: absolute; inset: 0; pointer-events: none;
+}
+#zone-layer.drawing { pointer-events: auto; cursor: crosshair; touch-action: none; }
+.zone-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 7px 0; border-bottom: 1px solid var(--line); font-size: 13px;
+}
+.zone-row:last-child { border-bottom: 0; }
+.zone-row .nm { flex: 1; color: var(--text); }
+.zone-row .sc { color: var(--dim); font-variant-numeric: tabular-nums; }
+.zone-row .st { font-weight: 700; font-size: 12px; letter-spacing: .06em; }
+.zone-row .st.in { color: var(--ok); }
+.zone-row .st.out { color: var(--dim); }
+.hint { color: var(--accent); font-size: 12px; margin-top: 10px; }

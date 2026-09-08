@@ -27,6 +27,7 @@
 
   <div class="stage" id="stage">
     <video id="remote" autoplay playsinline muted></video>
+    <canvas id="zone-layer"></canvas>
     <div class="overlay" id="overlay">カメラ端末の接続を待っています</div>
   </div>
 
@@ -35,6 +36,30 @@
     <button id="btn-off" disabled>CAMERA OFF</button>
     <button id="btn-audio" disabled>音を出す</button>
     <button id="btn-snap" disabled>スナップショット</button>
+  </div>
+
+  <div class="card" style="margin-top:14px">
+    <div class="row" style="border:0; padding:0 0 8px">
+      <span class="label">見張り</span>
+      <span class="val" id="t-detect">—</span>
+    </div>
+    <div class="seg">
+      <button id="dt-on">する</button>
+      <button id="dt-off">しない</button>
+    </div>
+
+    <div class="label" style="margin:16px 0 8px">見張る場所と反応</div>
+    <div id="zone-list"></div>
+    <div class="seg" style="margin-top:10px">
+      <button id="zn-litter">トイレの範囲</button>
+      <button id="zn-food">エサ場の範囲</button>
+    </div>
+    <div class="hint" id="zone-hint" hidden></div>
+    <p class="sub">
+      ボタンを押してから、映像の上をなぞって範囲を囲みます。<br>
+      反応の数字は、何もいないときとの差です。大きいほど「何かいる」。<br>
+      見張っているあいだ、自動スタンバイは止まります。
+    </p>
   </div>
 
   <div class="card" style="margin-top:14px">
@@ -146,6 +171,12 @@
   let camZoom = null;     // ズームの範囲と現在の倍率（非対応なら null）
   let camStandby = null;  // 自動スタンバイが有効か
   let camState = 'off';   // off / on / standby / error
+  let camDetect = null;   // 見張りが動いているか
+  let camZones = [];      // 見張る区画
+  let zoneScores = {};    // 区画ごとの反応値
+  let zoneBusy = {};      // 区画ごとの「いる/いない」
+  let drawingFor = null;  // いま範囲を指定しようとしている区画のid
+  const ZONE_NAMES = { litter: 'トイレ', food: 'エサ場' };
   if (SOUND_KEYS.indexOf(chimeSound) < 0) chimeSound = 'chime';
   if (!(chimeVolume in VOLUMES)) chimeVolume = 'low';
 
@@ -344,6 +375,8 @@
     camState = m.camera || 'off';
     camOn = (camState === 'on');
     camStandby = (typeof m.standby === 'boolean') ? m.standby : null;
+    camDetect = (typeof m.detect === 'boolean') ? m.detect : null;
+    camZones = Array.isArray(m.zones) ? m.zones : [];
     camAudio = !!m.audio;
     camSounds = Array.isArray(m.sounds) ? m.sounds : null;
     camZoom = (m.zoom && typeof m.zoom.max === 'number') ? m.zoom : null;
@@ -357,6 +390,17 @@
     $('sb-off').setAttribute('aria-pressed', String(camStandby === false));
     $('sb-on').disabled = !m.online;
     $('sb-off').disabled = !m.online;
+
+    $('t-detect').textContent =
+      camDetect === null ? '—' : (camDetect ? '見張り中' : '止まっています');
+    $('dt-on').setAttribute('aria-pressed', String(camDetect === true));
+    $('dt-off').setAttribute('aria-pressed', String(camDetect === false));
+    $('dt-on').disabled = !m.online;
+    $('dt-off').disabled = !m.online;
+    $('zn-litter').disabled = !m.online;
+    $('zn-food').disabled = !m.online;
+    renderZoneList();
+    drawZones();
 
     if (m.error) { errBox.textContent = m.error; errBox.hidden = false; }
     else { errBox.hidden = true; }
@@ -538,6 +582,147 @@
   $('z-in').addEventListener('click', () => sendZoom(camZoom.value + zoomStep()));
   $('z-out').addEventListener('click', () => sendZoom(camZoom.value - zoomStep()));
   $('z-reset').addEventListener('click', () => sendZoom(camZoom.min));
+
+  // ---- 見張る区画 ------------------------------------------------------
+  /* 映像は object-fit: contain で表示しているので、要素の枠と
+     実際に絵が出ている範囲は一致しない（上下か左右に余白ができる）。
+     区画の位置は絵のほうを基準にしないと、カメラ側とずれる。 */
+  function contentRect() {
+    const r = video.getBoundingClientRect();
+    const vw = video.videoWidth, vh = video.videoHeight;
+    if (!vw || !vh) return null;
+    const scale = Math.min(r.width / vw, r.height / vh);
+    const w = vw * scale, h = vh * scale;
+    return { left: r.left + (r.width - w) / 2, top: r.top + (r.height - h) / 2,
+             width: w, height: h };
+  }
+
+  let drawBox = null;
+  let drawStart = null;
+
+  function drawZones() {
+    const cv = $('zone-layer');
+    const stage = $('stage').getBoundingClientRect();
+    if (cv.width !== Math.round(stage.width) || cv.height !== Math.round(stage.height)) {
+      cv.width = Math.round(stage.width);
+      cv.height = Math.round(stage.height);
+    }
+    const ctx = cv.getContext('2d');
+    ctx.clearRect(0, 0, cv.width, cv.height);
+    const cr = contentRect();
+    if (cr) {
+      const ox = cr.left - stage.left, oy = cr.top - stage.top;
+      for (const z of camZones) {
+        const x = ox + z.x * cr.width, y = oy + z.y * cr.height;
+        const w = z.w * cr.width, h = z.h * cr.height;
+        const busy = !!zoneBusy[z.id];
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = busy ? '#3ddc84' : '#d38318';
+        ctx.fillStyle = busy ? 'rgba(61,220,132,.18)' : 'rgba(211,131,24,.10)';
+        ctx.fillRect(x, y, w, h);
+        ctx.strokeRect(x, y, w, h);
+        ctx.font = '600 12px system-ui, sans-serif';
+        ctx.fillStyle = busy ? '#3ddc84' : '#d38318';
+        const sc = zoneScores[z.id];
+        ctx.fillText((ZONE_NAMES[z.id] || z.id) + (sc === undefined ? '' : '  ' + sc),
+                     x + 4, y + 15);
+      }
+    }
+    if (drawBox) {
+      ctx.setLineDash([5, 4]);
+      ctx.strokeStyle = '#e8eaed';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(drawBox.x, drawBox.y, drawBox.w, drawBox.h);
+      ctx.setLineDash([]);
+    }
+  }
+
+  function renderZoneList() {
+    const box = $('zone-list');
+    box.innerHTML = '';
+    if (!camZones.length) {
+      box.innerHTML = '<div class="zone-row"><span class="nm" '
+        + 'style="color:var(--dim)">まだ指定されていません</span></div>';
+      return;
+    }
+    for (const z of camZones) {
+      const row = document.createElement('div');
+      row.className = 'zone-row';
+      const busy = !!zoneBusy[z.id];
+      const score = zoneScores[z.id];
+      row.innerHTML =
+        '<span class="nm">' + (ZONE_NAMES[z.id] || z.id) + '</span>'
+        + '<span class="sc">' + (score === undefined ? '—' : score) + '</span>'
+        + '<span class="st ' + (busy ? 'in' : 'out') + '">'
+        + (busy ? 'いる' : 'いない') + '</span>';
+      box.appendChild(row);
+    }
+  }
+
+  function beginDraw(id) {
+    drawingFor = id;
+    drawBox = null;
+    $('zone-layer').classList.add('drawing');
+    $('zone-hint').hidden = false;
+    $('zone-hint').textContent =
+      (ZONE_NAMES[id] || id) + 'の範囲を、映像の上でなぞって囲んでください';
+  }
+
+  function endDraw() {
+    drawingFor = null;
+    drawBox = null;
+    drawStart = null;
+    $('zone-layer').classList.remove('drawing');
+    $('zone-hint').hidden = true;
+    drawZones();
+  }
+
+  const layer = $('zone-layer');
+  layer.addEventListener('pointerdown', (ev) => {
+    if (!drawingFor) return;
+    const r = layer.getBoundingClientRect();
+    drawStart = { x: ev.clientX - r.left, y: ev.clientY - r.top };
+    try { layer.setPointerCapture(ev.pointerId); } catch (e) {}
+  });
+  layer.addEventListener('pointermove', (ev) => {
+    if (!drawingFor || !drawStart) return;
+    const r = layer.getBoundingClientRect();
+    const x = ev.clientX - r.left, y = ev.clientY - r.top;
+    drawBox = { x: Math.min(drawStart.x, x), y: Math.min(drawStart.y, y),
+                w: Math.abs(x - drawStart.x), h: Math.abs(y - drawStart.y) };
+    drawZones();
+  });
+  layer.addEventListener('pointerup', () => {
+    if (!drawingFor || !drawBox) { endDraw(); return; }
+    const cr = contentRect();
+    const stage = $('stage').getBoundingClientRect();
+    if (!cr || drawBox.w < 8 || drawBox.h < 8) { endDraw(); return; }
+    const ox = cr.left - stage.left, oy = cr.top - stage.top;
+    const z = {
+      id: drawingFor,
+      name: ZONE_NAMES[drawingFor] || drawingFor,
+      x: (drawBox.x - ox) / cr.width,
+      y: (drawBox.y - oy) / cr.height,
+      w: drawBox.w / cr.width,
+      h: drawBox.h / cr.height
+    };
+    conn.send({ t: 'set_zones', zones: camZones.filter((o) => o.id !== z.id).concat([z]) });
+    endDraw();
+  });
+
+  $('zn-litter').addEventListener('click', () => beginDraw('litter'));
+  $('zn-food').addEventListener('click', () => beginDraw('food'));
+  $('dt-on').addEventListener('click', () => conn.send({ t: 'cmd', action: 'detect_on' }));
+  $('dt-off').addEventListener('click', () => conn.send({ t: 'cmd', action: 'detect_off' }));
+
+  conn.on('detect', (m) => {
+    zoneScores = m.scores || {};
+    zoneBusy = m.busy || {};
+    renderZoneList();
+    drawZones();
+  });
+
+  window.addEventListener('resize', drawZones);
 
   function updateChimeButtons() {
     for (const k of SOUND_KEYS) {
