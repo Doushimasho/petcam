@@ -101,8 +101,35 @@ def fetch(name: str) -> tuple[bool, str]:
     return code == 0, out.strip()
 
 
+def cert_name() -> str | None:
+    """手元の証明書が、どの名前あてに出されたものか。"""
+    if not CERT_FILE.exists():
+        return None
+    try:
+        from cryptography import x509
+
+        cert = x509.load_pem_x509_certificate(CERT_FILE.read_bytes())
+        san = cert.extensions.get_extension_for_class(
+            x509.SubjectAlternativeName
+        ).value
+        names = san.get_values_for_type(x509.DNSName)
+        return names[0] if names else None
+    except Exception:
+        return None
+
+
 def ensure() -> tuple[Path, Path, str] | None:
     """使える証明書があれば (証明書, 鍵, 名前) を返す。無ければ None。"""
+    # まだ十分に期限が残っているなら、Tailscale に問い合わせずに手元のものを使う。
+    #
+    # 自動起動を SYSTEM で動かすと、Tailscale への問い合わせが通らない
+    # 可能性がある。そこで諦めると、証明書があるのに自己署名へ落ちて
+    # ブラウザに警告が出る。持っているものは、まず使う。
+    if days_left() >= RENEW_BELOW_DAYS and KEY_FILE.exists():
+        got = cert_name()
+        if got:
+            return CERT_FILE, KEY_FILE, got
+
     if not exe():
         return None
     name = hostname()
