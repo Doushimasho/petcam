@@ -52,8 +52,10 @@ class Conn {
 
   scheduleRetry() {
     if (this.closed) return;
-    // 1秒から始めて最大10秒まで間隔を広げる
-    const wait = Math.min(1000 * Math.pow(1.6, this.retry++), 10000);
+    // 1秒から始めて最大5秒まで間隔を広げる。
+    // パソコンが再起動したあと、カメラ端末が戻ってくるのが遅いと
+    // 見に行っても「繋がっていません」と出てしまう。
+    const wait = Math.min(1000 * Math.pow(1.6, this.retry++), 5000);
     setTimeout(() => this.start(), wait);
   }
 

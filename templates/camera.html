@@ -126,7 +126,13 @@
   /* 利用者が望んでいる状態と、いま実際に映しているかは別物。
      「動かしたい（desired='on'）が、見ている人がいないので止めている」
      という状態があるので、両方を持つ必要がある。 */
-  let desired = 'off';
+  /* 前回どうしていたかを覚えておく。
+
+     スマホが再起動したりChromeがページを捨てたりすると、
+     読み込み直しでONの状態が失われる。留守中だと誰も押しに行けない。
+     覚えておいて、繋がった時点で自分で元に戻る。 */
+  let desired = localStorage.getItem('petcam.desired') === 'on' ? 'on' : 'off';
+  let restored = false;
   let autoStandby = localStorage.getItem('petcam.standby') !== 'off';
   let watchers = 0;
   let standbyTimer = null;
@@ -298,6 +304,7 @@
   // ---- 利用者の意思 ----------------------------------------------------
   async function startCamera() {
     desired = 'on';
+    localStorage.setItem('petcam.desired', 'on');
     clearTimeout(standbyTimer);
     standbyTimer = null;
     await openStream();
@@ -306,6 +313,7 @@
 
   function stopCamera() {
     desired = 'off';
+    localStorage.setItem('petcam.desired', 'off');
     clearTimeout(standbyTimer);
     standbyTimer = null;
     closeStream();
@@ -845,6 +853,7 @@
   function setDetect(on) {
     if (detectOn === on) return;
     detectOn = on;
+    localStorage.setItem('petcam.detect', on ? 'on' : 'off');
     background = null;
     for (const k of Object.keys(zoneState)) delete zoneState[k];
     clearInterval(detTimer);
@@ -903,6 +912,21 @@
   conn.on('open', () => {
     $('t-conn').textContent = 'CONNECTED';
     setDot($('d-conn'), 'ok');
+    if (!restored) {
+      // 読み込み直したあと、前回の状態へ自分で戻る。
+      // 見ている人がいなければ待機のまま。見に来た時点で起き上がる。
+      restored = true;
+      if (localStorage.getItem('petcam.detect') === 'on' && !detectOn) {
+        setDetect(true);
+        return;
+      }
+      if (desired === 'on' && !stream) {
+        reportCamera('standby');
+        updateStandby();
+        return;
+      }
+    }
+
     if (stream) {
       // ここで映像の接続を作り直さない。
       // 通信が切れている間も映像そのものは生きていることが多く、
