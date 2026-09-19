@@ -49,6 +49,18 @@ def running() -> bool:
         return s.connect_ex(("127.0.0.1", port())) == 0
 
 
+def task_detail() -> str:
+    """どういう条件で起動する設定になっているか。"""
+    code, out = powershell(
+        f"$t = Get-ScheduledTask -TaskName '{TASK_NAME}' -ErrorAction SilentlyContinue;"
+        "if (-not $t) { 'none' } else {"
+        "  $kind = if ($t.Triggers[0].CimClass.CimClassName -like '*Boot*')"
+        "          { 'PCの起動時' } else { 'ログオン時' };"
+        "  $kind + ' / ' + $t.Principal.UserId }"
+    )
+    return out.strip() if code == 0 else "?"
+
+
 def task_exists() -> bool:
     code, _ = powershell(
         f"if (Get-ScheduledTask -TaskName '{TASK_NAME}' "
@@ -57,21 +69,41 @@ def task_exists() -> bool:
     return code == 0
 
 
+def is_admin() -> bool:
+    try:
+        import ctypes
+
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
+
+
 def install() -> int:
+    # SYSTEM で動く仕事を登録するには管理者の権限が要る
+    if not is_admin():
+        print("  管理者として実行する必要があります。")
+        print()
+        print("  install_autostart.bat を右クリック →「管理者として実行」")
+        print("  でやり直してください。")
+        return 1
+
     exe = pythonw()
     script = BASE / "server.py"
     ps = f"""
 $ErrorActionPreference = 'Stop'
 $action = New-ScheduledTaskAction -Execute '{exe}' `
     -Argument '"{script}"' -WorkingDirectory '{BASE}'
-$trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+$trigger = New-ScheduledTaskTrigger -AtStartup
+$trigger.Delay = 'PT30S'
+$principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' `
+    -LogonType ServiceAccount -RunLevel Highest
 $settings = New-ScheduledTaskSettingsSet `
     -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
     -StartWhenAvailable -MultipleInstances IgnoreNew `
     -ExecutionTimeLimit ([TimeSpan]::Zero) `
     -RestartInterval (New-TimeSpan -Minutes 1) -RestartCount 3
 Register-ScheduledTask -TaskName '{TASK_NAME}' -Action $action `
-    -Trigger $trigger -Settings $settings -Force `
+    -Trigger $trigger -Principal $principal -Settings $settings -Force `
     -Description 'ペットカメラのサーバを自動で起動します' | Out-Null
 """
     code, out = powershell(ps)
@@ -86,7 +118,8 @@ Register-ScheduledTask -TaskName '{TASK_NAME}' -Action $action `
 
     print("  自動起動を設定しました。")
     print()
-    print("  ・パソコンにログインすると、自動でカメラが使えるようになります")
+    print("  ・パソコンの電源を入れると、ログインしなくても立ち上がります")
+    print("  ・Windows Update の再起動のあとも、自分で復帰します")
     print("  ・黒い画面は出ません")
     print("  ・止まっても自動で起動し直します")
     print()
@@ -134,7 +167,15 @@ def status() -> int:
     print("  PET CAMERA の状態")
     print("=" * 58)
     print(f"  サーバ    : {'動いています' if running() else '止まっています'}")
-    print(f"  自動起動  : {'設定済み' if task_exists() else '未設定'}")
+    if task_exists():
+        detail = task_detail()
+        print(f"  自動起動  : 設定済み（{detail}）")
+        if "ログオン時" in detail:
+            print("              ※ ログオンしないと立ち上がりません。")
+            print("                 install_autostart.bat を管理者として実行し直すと、")
+            print("                 電源投入だけで立ち上がるようになります。")
+    else:
+        print("  自動起動  : 未設定")
     print()
     if cfg.get("pin"):
         print(f"  PIN       : {cfg['pin']}")
