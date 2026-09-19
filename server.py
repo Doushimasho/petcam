@@ -488,6 +488,13 @@ def handle_join(peer: Peer, msg: dict) -> None:
     if role not in ("camera", "viewer"):
         return
     peer.role = role
+    # 誰がいつ繋がったかを残す。
+    # 「開いたのに映らない」を調べるとき、カメラ側がいつ戻ってきたかが
+    # 分からないと、待ち時間の内訳が読めない。
+    logging.getLogger("werkzeug").info(
+        "%s が接続しました（%s）", "カメラ端末" if role == "camera" else "視聴者",
+        peer.sid[:6],
+    )
     if role == "camera":
         with _lock:
             state["camera_sid"] = peer.sid
@@ -563,8 +570,13 @@ def handle_message(peer: Peer, msg: dict) -> None:
         with _lock:
             if state["camera_sid"] != peer.sid:
                 return
+            before = state["camera"]
             state["camera"] = msg.get("state", "off")
             state["error"] = msg.get("error")
+            if before != state["camera"]:
+                logging.getLogger("werkzeug").info(
+                    "カメラの状態: %s → %s", before, state["camera"]
+                )
             state["audio"] = bool(msg.get("audio"))
             got = msg.get("sounds")
             if isinstance(got, list):
@@ -671,6 +683,11 @@ def handle_message(peer: Peer, msg: dict) -> None:
 
 
 def on_close(peer: Peer) -> None:
+    if peer.role:
+        logging.getLogger("werkzeug").info(
+            "%s が切断しました（%s）",
+            "カメラ端末" if peer.role == "camera" else "視聴者", peer.sid[:6],
+        )
     with _lock:
         peers.pop(peer.sid, None)
         was_camera = state["camera_sid"] == peer.sid
