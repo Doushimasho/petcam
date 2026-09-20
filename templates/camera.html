@@ -242,10 +242,13 @@
       detect: detectOn,
       record: recordOn,
       battery: battery,
-      quality: usingQuality
+      quality: usingQuality,
+      rest_left: restMinutesLeft()
     });
     $('t-cam').textContent =
-      st === 'standby' ? 'STANDBY（待機中）' : st.toUpperCase();
+      st === 'standby' ? 'STANDBY（待機中）'
+      : st === 'resting' ? ('RESTING（休止中 あと' + restMinutesLeft() + '分）')
+      : st.toUpperCase();
     setDot($('d-cam'), st === 'on' ? 'ok' : (st === 'error' ? 'err' : ''));
     $('btn-start').disabled = (desired === 'on');
     $('btn-stop').disabled = (desired !== 'on');
@@ -346,6 +349,7 @@
 
   function updateStandby() {
     if (desired !== 'on') return;
+    if (restUntil) return;   // 休止中は起こさない
 
     if (!autoStandby) {
       clearTimeout(standbyTimer);
@@ -600,6 +604,77 @@
     diag('相手の候補 ' + briefCandidate(m.candidate));
     try { await pc.addIceCandidate(m.candidate); } catch (e) {}
   });
+
+  // ---- 運転のきまり ----------------------------------------------------
+  /* 古い端末を常時通電で回すので、熱を溜め込ませない歯止めを置く。
+
+     ・決めた時間帯の外では動かさない
+     ・続けて動きすぎたら、いったん休ませる
+
+     時刻の判断はカメラ端末自身が行う。サーバが落ちていても、
+     端末の中で止まるべきものは止まる。 */
+  let rules = null;
+  let rulesJson = '';
+  let insideWindow = null;   // 直前に見たとき、時間帯の中だったか
+  let runStartedAt = 0;      // いまの連続運転が始まった時刻
+  let restUntil = 0;         // 休止が明ける時刻
+
+  function toMinutes(hhmm) {
+    const p = String(hhmm || '').split(':');
+    return (parseInt(p[0], 10) || 0) * 60 + (parseInt(p[1], 10) || 0);
+  }
+
+  function inWindow(sc) {
+    const d = new Date();
+    const now = d.getHours() * 60 + d.getMinutes();
+    const a = toMinutes(sc.from), b = toMinutes(sc.to);
+    // 22:00〜06:00 のように日をまたぐ指定にも対応する
+    return a <= b ? (now >= a && now < b) : (now >= a || now < b);
+  }
+
+  function restMinutesLeft() {
+    return restUntil ? Math.max(0, Math.ceil((restUntil - Date.now()) / 60000)) : 0;
+  }
+
+  function checkRules() {
+    if (!rules) return;
+
+    if (restUntil) {
+      if (Date.now() < restUntil) return;
+      restUntil = 0;
+      runStartedAt = 0;
+      updateStandby();
+      reportCamera(stream ? 'on' : (desired === 'on' ? 'standby' : 'off'));
+      return;
+    }
+
+    const sc = rules.schedule || {};
+    if (sc.enabled) {
+      const now = inWindow(sc);
+      if (insideWindow === null || now !== insideWindow) {
+        // 変わり目でだけ入れ直す。間は手で触ってよい。
+        insideWindow = now;
+        if (now) startCamera(); else stopCamera();
+      }
+    } else {
+      insideWindow = null;
+    }
+
+    if (stream) {
+      if (!runStartedAt) runStartedAt = Date.now();
+      const limit = (rules.max_run_min || 360) * 60000;
+      if (Date.now() - runStartedAt >= limit && watchers === 0) {
+        // 見ている人がいるあいだは切らない。見終わってから休ませる。
+        restUntil = Date.now() + (rules.rest_min || 30) * 60000;
+        closeStream();
+        reportCamera('resting');
+      }
+    } else if (!restUntil) {
+      runStartedAt = 0;
+    }
+  }
+
+  setInterval(checkRules, 30000);
 
   // ---- 見張って録画する ------------------------------------------------
   /* 区画に入った瞬間から録り始めても、肝心の「入るところ」が写らない。
@@ -952,6 +1027,14 @@
 
     // 区画が変わったときだけ背景を覚え直す。
     // 状態は頻繁に届くので、毎回捨てていては覚えられない。
+    const nextRules = JSON.stringify(m.rules || null);
+    if (nextRules !== rulesJson) {
+      rulesJson = nextRules;
+      rules = m.rules || null;
+      insideWindow = null;   // 変わったら見直す
+      checkRules();
+    }
+
     const next = JSON.stringify(m.zones || []);
     if (next !== zonesJson) {
       zonesJson = next;
