@@ -135,6 +135,61 @@ def safe_rec_name(name: str) -> Path | None:
     return f if f.exists() else None
 
 
+# ---- 運転のきまり ------------------------------------------------------
+# 「何時から何時まで動かすか」と「続けて動かしてよい上限」。
+# 古い端末を常時通電で回すので、熱を溜め込ませない歯止めが要る。
+RULES_FILE = BASE / "rules.json"
+RULES_DEFAULT = {
+    "schedule": {"enabled": False, "from": "08:00", "to": "22:00"},
+    "max_run_min": 360,   # これだけ続けて動いたら休ませる
+    "rest_min": 30,       # 休ませる長さ
+}
+
+
+def load_rules() -> dict:
+    out = dict(RULES_DEFAULT)
+    if RULES_FILE.exists():
+        try:
+            got = json.loads(RULES_FILE.read_text(encoding="utf-8"))
+            if isinstance(got, dict):
+                out.update(got)
+        except ValueError:
+            pass
+    return out
+
+
+def clean_rules(raw) -> dict | None:
+    """受け取ったきまりを検算する。おかしければ None。"""
+    if not isinstance(raw, dict):
+        return None
+    sc = raw.get("schedule") or {}
+    if not isinstance(sc, dict):
+        return None
+
+    def hhmm(v, fallback):
+        t = str(v)[:5]
+        parts = t.split(":")
+        if len(parts) != 2 or not all(x.isdigit() for x in parts):
+            return fallback
+        h, m = int(parts[0]), int(parts[1])
+        if not (0 <= h < 24 and 0 <= m < 60):
+            return fallback
+        return f"{h:02d}:{m:02d}"
+
+    try:
+        return {
+            "schedule": {
+                "enabled": bool(sc.get("enabled")),
+                "from": hhmm(sc.get("from"), "08:00"),
+                "to": hhmm(sc.get("to"), "22:00"),
+            },
+            "max_run_min": min(max(int(raw.get("max_run_min", 360)), 30), 1440),
+            "rest_min": min(max(int(raw.get("rest_min", 30)), 5), 240),
+        }
+    except (TypeError, ValueError):
+        return None
+
+
 # ---- 見張る区画 --------------------------------------------------------
 # ケージの「トイレ」「エサ場」のように、映像の中の決まった場所を見張る。
 # 位置は 0〜1 の割合で持つ。解像度や画質を変えても意味が変わらないため。
@@ -216,6 +271,7 @@ class Peer:
 _lock = threading.Lock()
 peers: dict[str, Peer] = {}
 zones: list[dict] = load_zones()
+rules: dict = load_rules()
 CHIME_MIN_GAP = 1.5  # 音を鳴らす指示の最短間隔（秒）
 state = {
     "camera_sid": None,
@@ -229,6 +285,7 @@ state = {
     "record": False,  # 見張りに引っかかったら録画するか
     "battery": None,  # カメラ端末の電池（残量と充電中か）
     "quality": None,  # いま使っている画質
+    "rest_left": 0,   # 休止が明けるまでの分数
     "last_chime": 0.0,
 }
 
@@ -249,7 +306,9 @@ def snapshot() -> dict:
             "record": state["record"],
             "battery": state["battery"],
             "quality": state["quality"],
+            "rest_left": state["rest_left"],
             "zones": zones,
+            "rules": rules,
             "viewers": len(viewers),
             # 実際に画面を見ている人の数。カメラを動かすかどうかはこれで決める
             "watchers": sum(1 for p in viewers if p.watching),
@@ -527,6 +586,20 @@ def handle_message(peer: Peer, msg: dict) -> None:
         out.pop("to", None)
         out["from"] = peer.sid
         send_to(to, out)
+    elif t == "set_rules":
+        # 運転のきまりを決めるのは見る側。カメラ端末には触りに行かせない。
+        if peer.role != "viewer":
+            return
+        cleaned = clean_rules(msg.get("rules"))
+        if cleaned is None:
+            return
+        global rules
+        rules = cleaned
+        RULES_FILE.write_text(
+            json.dumps(rules, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        logging.getLogger("werkzeug").info("運転のきまりを変えました: %s", rules)
+        broadcast_state()
     elif t == "set_zones":
         # 見張る場所を決めるのは見る側。カメラ端末には触りに行かせない。
         if peer.role != "viewer":
@@ -597,6 +670,10 @@ def handle_message(peer: Peer, msg: dict) -> None:
                     pass
             q = msg.get("quality")
             state["quality"] = str(q)[:16] if q else None
+            try:
+                state["rest_left"] = max(0, int(msg.get("rest_left", 0)))
+            except (TypeError, ValueError):
+                state["rest_left"] = 0
             z = msg.get("zoom")
             if isinstance(z, dict):
                 try:

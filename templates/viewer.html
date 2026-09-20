@@ -104,6 +104,41 @@
   </div>
 
   <div class="card" style="margin-top:14px">
+    <div class="label" style="margin-bottom:8px">運転のきまり</div>
+    <p class="sub" style="margin-top:0">
+      古い端末を長く回すので、熱を溜め込ませないための歯止めです。
+    </p>
+
+    <div class="row" style="border:0; padding:10px 0 8px">
+      <span class="label">時間帯で動かす</span>
+      <span class="val" id="t-schedule">—</span>
+    </div>
+    <div class="seg">
+      <button id="sch-on">する</button>
+      <button id="sch-off">しない</button>
+    </div>
+    <div class="seg" style="margin-top:8px">
+      <input type="time" id="sch-from" value="08:00">
+      <input type="time" id="sch-to" value="22:00">
+    </div>
+    <p class="sub">
+      この時間の外では自動で止まります。夜だけ止める（22:00〜08:00 を外す）
+      といった使い方ができます。日をまたぐ指定もできます。
+    </p>
+
+    <div class="label" style="margin:16px 0 8px">続けて動かす上限</div>
+    <div class="seg3">
+      <button id="run-180">3時間</button>
+      <button id="run-360">6時間</button>
+      <button id="run-720">12時間</button>
+    </div>
+    <p class="sub">
+      上限に達すると<b>30分休みます</b>。見ている人がいる間は中断しません。
+      休み明けは自動で戻ります。
+    </p>
+  </div>
+
+  <div class="card" style="margin-top:14px">
     <div class="row" style="border:0; padding:0 0 8px">
       <span class="label">自動スタンバイ</span>
       <span class="val" id="t-standby">—</span>
@@ -210,7 +245,8 @@
   let camSounds = null;   // カメラ端末が知っている音の一覧
   let camZoom = null;     // ズームの範囲と現在の倍率（非対応なら null）
   let camStandby = null;  // 自動スタンバイが有効か
-  let camState = 'off';   // off / on / standby / error
+  let camState = 'off';   // off / on / standby / resting / error
+  let camRules = null;    // 運転のきまり
   let camDetect = null;   // 見張りが動いているか
   let camZones = [];      // 見張る区画
   let zoneScores = {};    // 区画ごとの反応値
@@ -444,8 +480,13 @@
     camAudio = !!m.audio;
     camSounds = Array.isArray(m.sounds) ? m.sounds : null;
     camZoom = (m.zoom && typeof m.zoom.max === 'number') ? m.zoom : null;
+    camRules = m.rules || null;
+    updateRulesUI();
+
     $('t-cam').textContent =
-      camState === 'standby' ? 'STANDBY' : camState.toUpperCase();
+      camState === 'standby' ? 'STANDBY'
+      : camState === 'resting' ? ('休止中 あと' + (m.rest_left || 0) + '分')
+      : camState.toUpperCase();
     setDot($('d-cam'), camOn ? 'ok' : (camState === 'error' ? 'err' : ''));
 
     $('t-standby').textContent =
@@ -479,13 +520,18 @@
 
     // ボタンは「利用者が望んでいる状態」で決める。
     // 待機中はカメラが止まっているが、望まれている状態はONのまま。
-    const wantOn = (camState === 'on' || camState === 'standby');
+    const wantOn = (camState === 'on' || camState === 'standby'
+                    || camState === 'resting');
     $('btn-on').disabled = !m.online || wantOn;
     $('btn-off').disabled = !m.online || !wantOn;
 
     if (!m.online) {
       closePeer();
       setOverlay('カメラ端末が接続されていません');
+    } else if (camState === 'resting') {
+      closePeer();
+      setOverlay('熱を冷ますため休止中です（あと'
+                 + (m.rest_left || 0) + '分）');
     } else if (camState === 'standby') {
       closePeer();
       setOverlay('カメラを起こしています…');
@@ -833,6 +879,55 @@
 
   window.addEventListener('resize', drawZones);
 
+  // ---- 運転のきまり ----------------------------------------------------
+  function sendRules(next) {
+    conn.send({ t: 'set_rules', rules: next });
+  }
+
+  function currentRules() {
+    return camRules || {
+      schedule: { enabled: false, from: '08:00', to: '22:00' },
+      max_run_min: 360, rest_min: 30
+    };
+  }
+
+  function updateRulesUI() {
+    const r = currentRules();
+    const on = !!(r.schedule && r.schedule.enabled);
+    $('t-schedule').textContent = on
+      ? (r.schedule.from + ' 〜 ' + r.schedule.to) : 'しない';
+    $('sch-on').setAttribute('aria-pressed', String(on));
+    $('sch-off').setAttribute('aria-pressed', String(!on));
+    if (document.activeElement !== $('sch-from')) $('sch-from').value = r.schedule.from;
+    if (document.activeElement !== $('sch-to')) $('sch-to').value = r.schedule.to;
+    for (const m of [180, 360, 720]) {
+      $('run-' + m).setAttribute('aria-pressed', String(r.max_run_min === m));
+    }
+  }
+
+  $('sch-on').addEventListener('click', () => {
+    const r = currentRules();
+    sendRules({ ...r, schedule: { enabled: true,
+      from: $('sch-from').value, to: $('sch-to').value } });
+  });
+  $('sch-off').addEventListener('click', () => {
+    const r = currentRules();
+    sendRules({ ...r, schedule: { ...r.schedule, enabled: false } });
+  });
+  for (const el of ['sch-from', 'sch-to']) {
+    $(el).addEventListener('change', () => {
+      const r = currentRules();
+      if (!r.schedule.enabled) return;
+      sendRules({ ...r, schedule: { enabled: true,
+        from: $('sch-from').value, to: $('sch-to').value } });
+    });
+  }
+  for (const m of [180, 360, 720]) {
+    $('run-' + m).addEventListener('click', () => {
+      sendRules({ ...currentRules(), max_run_min: m });
+    });
+  }
+
   function updateChimeButtons() {
     for (const k of SOUND_KEYS) {
       $('s-' + k).setAttribute('aria-pressed', String(chimeSound === k));
@@ -904,6 +999,7 @@
   });
 
   updateChimeButtons();
+  updateRulesUI();
   applyAdvanced();
   conn.start();
 })();
