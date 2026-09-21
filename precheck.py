@@ -127,6 +127,41 @@ def check_cert() -> bool:
     return False
 
 
+def check_unattended() -> bool:
+    """Tailscale の無人モード。
+
+    これが無効だと、誰もログインしていない間だけネットワークから外れる。
+    サーバは動いているのにカメラ端末から到達できない、という
+    いちばん分かりにくい壊れ方をする。
+    """
+    try:
+        import json as _json
+        import ts_cert
+
+        exe = ts_cert.exe()
+        if not exe:
+            print(WARN + " Tailscale が見つかりません")
+            return False
+        out = subprocess.run(
+            [str(exe), "debug", "prefs"], capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=20,
+        ).stdout
+        on = bool(_json.loads(out).get("ForceDaemon"))
+    except Exception:
+        print(WARN + " Tailscale の設定を確認できません")
+        return False
+
+    if on:
+        print(OK + " ログインしていなくてもTailscaleが繋がる")
+        return True
+    print(NG + " Tailscaleがログイン中しか繋がらない設定")
+    print("         → 留守中に再起動すると、外から届かなくなります。")
+    print("            次を実行してください（管理者権限は不要）:")
+    print('            "C:' + chr(92) + 'Program Files' + chr(92) + 'Tailscale'
+          + chr(92) + 'tailscale.exe" set --unattended=true')
+    return False
+
+
 def check_devices() -> bool:
     try:
         import ts_cert
@@ -173,6 +208,7 @@ def main() -> int:
         check_fast_startup(),
         check_sleep(),
         check_cert(),
+        check_unattended(),
         check_devices(),
         check_recordings(),
     ]
