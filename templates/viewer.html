@@ -104,6 +104,26 @@
   </div>
 
   <div class="card" style="margin-top:14px">
+    <div class="label" style="margin-bottom:8px">パソコンの電源</div>
+    <p class="sub" style="margin-top:0">
+      サーバを動かしているパソコンを、ここから操作できます。
+    </p>
+    <div class="seg">
+      <button id="pw-restart">再起動する</button>
+      <button id="pw-shutdown">電源を切る</button>
+    </div>
+    <div class="msg" id="pw-msg"></div>
+    <button id="pw-abort" style="width:100%; margin-top:8px" hidden>
+      やっぱりやめる
+    </button>
+    <p class="sub">
+      <b>再起動</b>なら2〜3分で自分で戻ってきます。動きが怪しいときに。<br>
+      <b>電源を切る</b>と、スマートプラグで入れ直すまで戻りません。<br>
+      押しても20秒の猶予があります。その間なら取り消せます。
+    </p>
+  </div>
+
+  <div class="card" style="margin-top:14px">
     <div class="label" style="margin-bottom:8px">運転のきまり</div>
     <p class="sub" style="margin-top:0">
       古い端末を長く回すので、熱を溜め込ませないための歯止めです。
@@ -878,6 +898,70 @@
   });
 
   window.addEventListener('resize', drawZones);
+
+  // ---- パソコンの電源 --------------------------------------------------
+  /* 押し間違いでカメラが止まると、帰宅するまで戻せないことがある。
+     一度で実行せず、二度押しと取り消しの猶予を置く。 */
+  let pwArmed = null;
+  let pwArmTimer = null;
+
+  function pwMessage(text, kind) {
+    const el = $('pw-msg');
+    el.textContent = text || '';
+    el.className = 'msg' + (kind ? ' ' + kind : '');
+  }
+
+  function disarm() {
+    pwArmed = null;
+    clearTimeout(pwArmTimer);
+    $('pw-restart').textContent = '再起動する';
+    $('pw-shutdown').textContent = '電源を切る';
+  }
+
+  async function sendPower(action) {
+    try {
+      const r = await fetch('/power/' + action,
+                            { method: 'POST', credentials: 'same-origin' });
+      const j = await r.json();
+      pwMessage(j.message, j.ok ? 'ok' : 'ng');
+      return j.ok;
+    } catch (e) {
+      pwMessage('指示を送れませんでした', 'ng');
+      return false;
+    }
+  }
+
+  function armPower(action, label) {
+    const btn = $(action === 'restart' ? 'pw-restart' : 'pw-shutdown');
+    if (pwArmed === action) {
+      disarm();
+      sendPower(action);
+      return;
+    }
+    disarm();
+    pwArmed = action;
+    btn.textContent = 'もう一度押す';
+    pwMessage(label + 'します。よろしければもう一度押してください。');
+    pwArmTimer = setTimeout(() => { disarm(); pwMessage(''); }, 8000);
+  }
+
+  $('pw-restart').addEventListener('click', () => armPower('restart', '再起動'));
+  $('pw-shutdown').addEventListener('click', () => armPower('shutdown', '電源を切り'));
+  $('pw-abort').addEventListener('click', async () => {
+    if (await sendPower('abort')) $('pw-abort').hidden = true;
+  });
+
+  conn.on('power', (m) => {
+    if (m.action === 'abort') {
+      $('pw-abort').hidden = true;
+      pwMessage('取り消しました', 'ok');
+      return;
+    }
+    $('pw-abort').hidden = false;
+    pwMessage(
+      (m.action === 'restart' ? '再起動' : '電源を切る指示') +
+      'が出されました（あと' + m.seconds + '秒）', 'ng');
+  });
 
   // ---- 運転のきまり ----------------------------------------------------
   function sendRules(next) {
