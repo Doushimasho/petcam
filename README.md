@@ -367,8 +367,10 @@ PCやスマホのブラウザで `/viewer` を開き、同じPINを入力する�
 
 パソコンが落ちてしまったとき、外から起こせるようにしておく。
 
-1. **高速スタートアップを無効にする**（管理者のPowerShellで `powercfg /h off`）。
-   これをしないと、電源を入れ直しても完全な起動をせず、自動起動が走らない
+1. **高速スタートアップを無効にする** — `fix_startup.bat` をダブルクリックし、
+   許可の画面で「はい」を押す。
+   これをしないと、電源を入れ直しても完全な起動をせず、自動起動が走らない。
+   **「再起動」は常に完全な起動をするので、再起動のテストだけでは気づけない**
 2. BIOSで **Restore on AC/Power Loss** を `Power On` にする
    （ASRockなら Advanced → ACPI Configuration。起動時に `Delete` でBIOSへ、`F6` で詳細表示）
 3. スマートプラグにパソコンの電源を挿す
@@ -591,6 +593,7 @@ petcam/
 ├ ts_cert.py       Tailscaleの正式な証明書を取る・更新する
 ├ selftest.py      壊れていないか確かめる
 ├ precheck.bat     出かける前の確認（ダブルクリック）
+├ fix_startup.bat  高速スタートアップを無効にする（ダブルクリック）
 ├ config.json      PINなど（自動生成・gitに含めない）
 ├ petcam.log       通信と診断の記録（自動生成・gitに含めない）
 ├ certs/           証明書（自動生成・gitに含めない）
