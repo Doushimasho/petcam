@@ -18,6 +18,7 @@ import os
 import pathlib
 import secrets
 import ssl
+import subprocess
 import sys
 import threading
 import time
@@ -315,6 +316,13 @@ def snapshot() -> dict:
         }
 
 
+def socket_broadcast(msg: dict) -> None:
+    with _lock:
+        targets = list(peers.values())
+    for p in targets:
+        p.send(msg)
+
+
 def broadcast_state() -> None:
     msg = snapshot()
     with _lock:
@@ -527,6 +535,51 @@ def recording_delete(name: str):
             f.unlink(missing_ok=True)
             rec_save_index([r for r in rec_list() if r.get("file") != name])
     return redirect(url_for("recordings"))
+
+
+# ---- パソコンの電源操作 ------------------------------------------------
+# 遠隔から安全に終了・再起動できるようにする。
+# いきなり実行せず猶予を置き、取り消せるようにする。
+# 押し間違いでカメラが止まると、帰宅するまで戻せないため。
+POWER_DELAY = 20   # 実行までの猶予（秒）
+
+
+@app.route("/power/<action>", methods=["POST"])
+def power(action: str):
+    if not authed():
+        return {"ok": False, "message": "権限がありません"}, 403
+
+    note = "ペットカメラの画面から指示されました"
+    if action == "restart":
+        cmd = ["shutdown", "/r", "/t", str(POWER_DELAY), "/c", note]
+        text = f"{POWER_DELAY}秒後に再起動します"
+    elif action == "shutdown":
+        cmd = ["shutdown", "/s", "/t", str(POWER_DELAY), "/c", note]
+        text = f"{POWER_DELAY}秒後に電源を切ります"
+    elif action == "abort":
+        cmd = ["shutdown", "/a"]
+        text = "取り消しました"
+    else:
+        return {"ok": False, "message": "知らない指示です"}, 400
+
+    try:
+        r = subprocess.run(
+            cmd, capture_output=True, text=True,
+            encoding="cp932", errors="replace", timeout=15,
+        )
+    except Exception as e:
+        return {"ok": False, "message": str(e)}, 500
+
+    if r.returncode != 0:
+        detail = ((r.stdout or "") + (r.stderr or "")).strip()[:200]
+        if action == "abort":
+            return {"ok": False, "message": "取り消すものがありません"}
+        return {"ok": False, "message": detail or "実行できませんでした"}
+
+    logging.getLogger("werkzeug").warning("電源操作: %s", action)
+    # 見ている全員へ知らせる。誰かが押したことが他の人にも分かるように。
+    socket_broadcast({"t": "power", "action": action, "seconds": POWER_DELAY})
+    return {"ok": True, "message": text}
 
 
 @app.route("/viewer")
