@@ -281,6 +281,7 @@ state = {
     "audio": False,
     "sounds": None,   # カメラ端末が知っている音の名前
     "zoom": None,     # ズームの範囲と現在の倍率（非対応なら None）
+    "torch": None,    # ライトの状態（非対応なら None）
     "standby": True,  # 誰も見ていないときカメラを止めるか
     "detect": False,  # 見張りを動かしているか
     "record": False,  # 見張りに引っかかったら録画するか
@@ -302,6 +303,7 @@ def snapshot() -> dict:
             "audio": state["audio"],
             "sounds": state["sounds"],
             "zoom": state["zoom"],
+            "torch": state["torch"],
             "standby": state["standby"],
             "detect": state["detect"],
             "record": state["record"],
@@ -727,6 +729,14 @@ def handle_message(peer: Peer, msg: dict) -> None:
                 state["rest_left"] = max(0, int(msg.get("rest_left", 0)))
             except (TypeError, ValueError):
                 state["rest_left"] = 0
+            tr = msg.get("torch")
+            if isinstance(tr, dict):
+                state["torch"] = {
+                    "on": bool(tr.get("on")),
+                    "max_min": int(tr.get("max_min", 3)),
+                }
+            else:
+                state["torch"] = None
             z = msg.get("zoom")
             if isinstance(z, dict):
                 try:
@@ -746,6 +756,7 @@ def handle_message(peer: Peer, msg: dict) -> None:
         if action not in (
             "camera_on", "camera_off", "audio_on", "audio_off", "chime", "zoom",
             "standby_on", "standby_off", "detect_on", "detect_off",
+            "torch_on", "torch_off",
             "detect_reset", "detect_preview", "record_on", "record_off",
         ):
             return
@@ -828,6 +839,7 @@ def on_close(peer: Peer) -> None:
             state["audio"] = False
             state["sounds"] = None
             state["zoom"] = None
+            state["torch"] = None
             state["detect"] = False
             state["record"] = False
             state["battery"] = None

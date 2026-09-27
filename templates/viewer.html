@@ -40,8 +40,12 @@
     <button id="btn-off" disabled>CAMERA OFF</button>
     <button id="btn-audio" disabled>音を出す</button>
     <button id="btn-snap" disabled>スナップショット</button>
+    <button class="wide" id="btn-torch" disabled hidden>💡 ライトをつける</button>
     <button class="wide" id="btn-chime" disabled>♪ 音を鳴らす</button>
   </div>
+  <p class="sub" id="torch-note" hidden style="margin:6px 2px 0">
+    カメラ端末のライトです。熱を持つので<b id="torch-max">3</b>分で自動的に消えます。
+  </p>
 
   <button id="btn-advanced" style="width:100%; margin-top:14px">設定を開く</button>
 
@@ -264,6 +268,7 @@
   let chimeVolume = localStorage.getItem('petcam.volume');
   let camSounds = null;   // カメラ端末が知っている音の一覧
   let camZoom = null;     // ズームの範囲と現在の倍率（非対応なら null）
+  let camTorch = null;    // ライトの状態（非対応なら null）
   let camStandby = null;  // 自動スタンバイが有効か
   let camState = 'off';   // off / on / standby / resting / error
   let camRules = null;    // 運転のきまり
@@ -500,6 +505,7 @@
     camAudio = !!m.audio;
     camSounds = Array.isArray(m.sounds) ? m.sounds : null;
     camZoom = (m.zoom && typeof m.zoom.max === 'number') ? m.zoom : null;
+    camTorch = m.torch || null;
     camRules = m.rules || null;
     updateRulesUI();
 
@@ -565,6 +571,7 @@
     updateMediaButtons();
     updateChimeButtons();
     updateZoom();
+    updateTorch();
   });
 
   /* この画面を見ているかどうかを申告する。
@@ -678,6 +685,29 @@
       a.remove();
       setTimeout(() => URL.revokeObjectURL(url), 10000);
     }, 'image/png');
+  });
+
+  /* カメラ端末のライト。
+     対応していない機種では出さない（押せないボタンを見せない）。 */
+  function updateTorch() {
+    const btn = $('btn-torch');
+    const note = $('torch-note');
+    if (!camOn || !camTorch) {
+      btn.hidden = true;
+      note.hidden = true;
+      return;
+    }
+    btn.hidden = false;
+    note.hidden = false;
+    btn.disabled = false;
+    btn.textContent = camTorch.on ? '💡 ライトを消す' : '💡 ライトをつける';
+    btn.setAttribute('aria-pressed', camTorch.on ? 'true' : 'false');
+    $('torch-max').textContent = String(camTorch.max_min || 3);
+  }
+
+  $('btn-torch').addEventListener('click', () => {
+    if (!camTorch) return;
+    conn.send({ t: 'cmd', action: camTorch.on ? 'torch_off' : 'torch_on' });
   });
 
   /* ズームの表示。

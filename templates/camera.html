@@ -218,6 +218,42 @@
     };
   }
 
+  /* この端末のライト（LEDフラッシュ）が使えるか。
+     ズームと同じ仕組みで、対応は機種による。 */
+  let torchOn = false;
+  let torchTimer = null;
+  const TORCH_MAX_MIN = 3;   // 消し忘れ防止。これを過ぎたら自動で消す
+
+  function torchInfo() {
+    if (!stream) return null;
+    const track = stream.getVideoTracks()[0];
+    if (!track || !track.getCapabilities) return null;
+    let caps;
+    try { caps = track.getCapabilities(); } catch (e) { return null; }
+    if (!caps || !caps.torch) return null;
+    return { on: torchOn, max_min: TORCH_MAX_MIN };
+  }
+
+  /* ライトはレンズのすぐ横にあり、点けっぱなしにすると熱を持つ。
+     猫にとってもまぶしい。用が済んだら自動で消す。 */
+  async function applyTorch(on) {
+    if (!stream) return;
+    const track = stream.getVideoTracks()[0];
+    if (!track || !torchInfo()) return;
+    try {
+      await track.applyConstraints({ advanced: [{ torch: !!on }] });
+    } catch (e) {
+      return;
+    }
+    torchOn = !!on;
+    clearTimeout(torchTimer);
+    torchTimer = null;
+    if (torchOn) {
+      torchTimer = setTimeout(() => { applyTorch(false); }, TORCH_MAX_MIN * 60000);
+    }
+    reportCamera('on');
+  }
+
   /* カメラ側でズームすると、センサーの中央を使って撮り直すことになる。
      見る側で引き伸ばすのと違って、送られる映像そのものが精細になる。 */
   async function applyZoom(value) {
@@ -238,6 +274,7 @@
       t: 'camera_state', state: st, error: err || null, audio: audioOn,
       sounds: Object.keys(PETCAM_SOUNDS),  // 見る側が版の食い違いに気づけるように
       zoom: (st === 'on') ? zoomInfo() : null,
+      torch: (st === 'on') ? torchInfo() : null,
       standby: autoStandby,
       detect: detectOn,
       record: recordOn,
@@ -293,6 +330,9 @@
   }
 
   function closeStream() {
+    torchOn = false;
+    clearTimeout(torchTimer);
+    torchTimer = null;
     stopRecorder();
     dropAllPeers();
     if (stream) {
@@ -964,6 +1004,8 @@
     else if (m.action === 'audio_on') setAudio(true);
     else if (m.action === 'audio_off') setAudio(false);
     else if (m.action === 'zoom') applyZoom(m.value);
+    else if (m.action === 'torch_on') applyTorch(true);
+    else if (m.action === 'torch_off') applyTorch(false);
     else if (m.action === 'standby_on') setAutoStandby(true);
     else if (m.action === 'standby_off') setAutoStandby(false);
     else if (m.action === 'detect_on') setDetect(true);

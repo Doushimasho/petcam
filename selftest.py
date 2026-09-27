@@ -287,6 +287,30 @@ def main() -> int:
     st = wait_for(viewer, "state")
     check("非対応なら zoom は空で伝わる", bool(st and st.get("zoom") is None), st)
 
+    print("--- ライト ---")
+    cam.send(json.dumps({
+        "t": "camera_state", "state": "on",
+        "torch": {"on": False, "max_min": 3},
+    }))
+    st = wait_for(viewer, "state")
+    check("ライトの対応が視聴側へ伝わる",
+          bool(st and st.get("torch") and st["torch"]["on"] is False), st)
+    viewer.send(json.dumps({"t": "cmd", "action": "torch_on"}))
+    cmd = wait_for(cam, "cmd")
+    check("ライトを点ける指示が届く", bool(cmd and cmd["action"] == "torch_on"), cmd)
+    cam.send(json.dumps({
+        "t": "camera_state", "state": "on",
+        "torch": {"on": True, "max_min": 3},
+    }))
+    st = wait_for(viewer, "state")
+    check("点灯中であることが伝わる", bool(st and st["torch"]["on"] is True), st)
+    viewer.send(json.dumps({"t": "cmd", "action": "torch_off"}))
+    cmd = wait_for(cam, "cmd")
+    check("ライトを消す指示が届く", bool(cmd and cmd["action"] == "torch_off"), cmd)
+    cam.send(json.dumps({"t": "camera_state", "state": "on", "torch": None}))
+    st = wait_for(viewer, "state")
+    check("非対応なら torch は空で伝わる", bool(st and st.get("torch") is None), st)
+
     print("--- つなぎ直しの要求 ---")
     viewer.send(json.dumps({"t": "sync", "force": True}))
     inv = wait_for(cam, "new_viewer")
