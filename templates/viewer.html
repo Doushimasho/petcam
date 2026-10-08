@@ -177,6 +177,15 @@
     </p>
   </div>
 
+  <div class="card" id="lens-card" style="margin-top:14px" hidden>
+    <div class="row" style="border:0; padding:0 0 8px">
+      <span class="label">レンズ（画角）</span>
+      <span class="val" id="t-lens">—</span>
+    </div>
+    <div id="lens-buttons"></div>
+    <p class="sub" id="lens-note"></p>
+  </div>
+
   <div class="card" id="zoom-card" style="margin-top:14px" hidden>
     <div class="row" style="border:0; padding:0 0 8px">
       <span class="label">ズーム</span>
@@ -269,6 +278,8 @@
   let camSounds = null;   // カメラ端末が知っている音の一覧
   let camZoom = null;     // ズームの範囲と現在の倍率（非対応なら null）
   let camTorch = null;    // ライトの状態（非対応なら null）
+  let camLenses = [];     // 使えるレンズの一覧
+  let camLens = '';       // いま使っているレンズ
   let camStandby = null;  // 自動スタンバイが有効か
   let camState = 'off';   // off / on / standby / resting / error
   let camRules = null;    // 運転のきまり
@@ -506,6 +517,8 @@
     camSounds = Array.isArray(m.sounds) ? m.sounds : null;
     camZoom = (m.zoom && typeof m.zoom.max === 'number') ? m.zoom : null;
     camTorch = m.torch || null;
+    camLenses = Array.isArray(m.lenses) ? m.lenses : [];
+    camLens = typeof m.lens === 'string' ? m.lens : '';
     camRules = m.rules || null;
     updateRulesUI();
 
@@ -572,6 +585,7 @@
     updateChimeButtons();
     updateZoom();
     updateTorch();
+    updateLens();
   });
 
   /* この画面を見ているかどうかを申告する。
@@ -686,6 +700,49 @@
       setTimeout(() => URL.revokeObjectURL(url), 10000);
     }, 'image/png');
   });
+
+  /* レンズの選択。
+     ズームは「切り取って寄せる」ので画角は狭くなるだけだが、
+     レンズを替えると画角そのものが変わる。広角レンズを持つ端末なら
+     ここで 0.6倍相当の広い絵にできる。レンズが1つしかない端末では
+     ソフトでは広げられないので、カードを出さない。 */
+  function updateLens() {
+    const card = $('lens-card');
+    if (!camOn || camLenses.length <= 1) { card.hidden = true; return; }
+    card.hidden = false;
+
+    const now = camLenses.find((l) => l.id === camLens);
+    $('t-lens').textContent = now ? shortLens(now.label) : '—';
+    $('lens-note').textContent =
+      'レンズが' + camLenses.length + '本あります。'
+      + '押して切り替えて、広く写るものを選んでください（切り替えに2〜3秒）。';
+
+    const box = $('lens-buttons');
+    box.textContent = '';
+    camLenses.forEach((l) => {
+      const b = document.createElement('button');
+      b.textContent = shortLens(l.label);
+      b.style.cssText = 'display:block; width:100%; margin-bottom:6px';
+      b.setAttribute('aria-pressed', String(l.id === camLens));
+      b.disabled = (l.id === camLens);
+      b.addEventListener('click', () => {
+        conn.send({ t: 'cmd', action: 'lens', value: l.id });
+      });
+      box.appendChild(b);
+    });
+  }
+
+  /* 端末がつける名前は「camera2 0, facing back」のように素っ気ない。
+     そのまま出すと読みづらいので、前後だけ日本語にして番号を添える。 */
+  function shortLens(label) {
+    const s = String(label || '');
+    if (!s) return 'レンズ';
+    const num = (s.match(/(\d+)/) || [])[1];
+    const side = /front|user/i.test(s) ? '前面'
+               : /back|environment/i.test(s) ? '背面' : '';
+    if (side) return side + (num !== undefined ? ' ' + num : '');
+    return s.length > 28 ? s.slice(0, 28) + '…' : s;
+  }
 
   /* カメラ端末のライト。
      対応していない機種では出さない（押せないボタンを見せない）。 */

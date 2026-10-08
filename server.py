@@ -282,6 +282,8 @@ state = {
     "sounds": None,   # カメラ端末が知っている音の名前
     "zoom": None,     # ズームの範囲と現在の倍率（非対応なら None）
     "torch": None,    # ライトの状態（非対応なら None）
+    "lenses": [],     # 使えるレンズの一覧 [{id, label}]
+    "lens": "",       # いま使っているレンズ
     "standby": True,  # 誰も見ていないときカメラを止めるか
     "detect": False,  # 見張りを動かしているか
     "record": False,  # 見張りに引っかかったら録画するか
@@ -304,6 +306,8 @@ def snapshot() -> dict:
             "sounds": state["sounds"],
             "zoom": state["zoom"],
             "torch": state["torch"],
+            "lenses": state["lenses"],
+            "lens": state["lens"],
             "standby": state["standby"],
             "detect": state["detect"],
             "record": state["record"],
@@ -729,6 +733,23 @@ def handle_message(peer: Peer, msg: dict) -> None:
                 state["rest_left"] = max(0, int(msg.get("rest_left", 0)))
             except (TypeError, ValueError):
                 state["rest_left"] = 0
+            # レンズの一覧。端末が言ってきたものをそのまま信じず、
+            # 必要な形だけ抜き出して詰め替える。
+            lens_list = msg.get("lenses")
+            picked = []
+            if isinstance(lens_list, list):
+                for item in lens_list[:8]:
+                    if not isinstance(item, dict):
+                        continue
+                    lid = item.get("id")
+                    if not isinstance(lid, str) or not lid:
+                        continue
+                    label = item.get("label")
+                    label = label if isinstance(label, str) else ""
+                    picked.append({"id": lid, "label": label[:80]})
+            state["lenses"] = picked
+            cur = msg.get("lens")
+            state["lens"] = cur if isinstance(cur, str) else ""
             tr = msg.get("torch")
             if isinstance(tr, dict):
                 state["torch"] = {
@@ -756,13 +777,24 @@ def handle_message(peer: Peer, msg: dict) -> None:
         if action not in (
             "camera_on", "camera_off", "audio_on", "audio_off", "chime", "zoom",
             "standby_on", "standby_off", "detect_on", "detect_off",
-            "torch_on", "torch_off",
+            "torch_on", "torch_off", "lens",
             "detect_reset", "detect_preview", "record_on", "record_off",
         ):
             return
         out = {"t": "cmd", "action": action, "from": peer.sid}
         if action == "detect_preview":
             out["value"] = bool(msg.get("value"))
+        if action == "lens":
+            v = msg.get("value")
+            # 知らないレンズを指名されたら流さない。
+            # カメラ端末の側でも確かめるが、通さないほうが早い。
+            if not isinstance(v, str) or not v:
+                return
+            with _lock:
+                known = [l["id"] for l in state["lenses"]]
+            if v not in known:
+                return
+            out["value"] = v
         if action == "zoom":
             try:
                 out["value"] = float(msg.get("value"))
@@ -840,6 +872,8 @@ def on_close(peer: Peer) -> None:
             state["sounds"] = None
             state["zoom"] = None
             state["torch"] = None
+            state["lenses"] = []
+            state["lens"] = ""
             state["detect"] = False
             state["record"] = False
             state["battery"] = None
