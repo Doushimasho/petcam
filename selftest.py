@@ -287,6 +287,40 @@ def main() -> int:
     st = wait_for(viewer, "state")
     check("非対応なら zoom は空で伝わる", bool(st and st.get("zoom") is None), st)
 
+    print("--- レンズ ---")
+    cam.send(json.dumps({
+        "t": "camera_state", "state": "on",
+        "lenses": [
+            {"id": "wide1", "label": "camera2 0, facing back"},
+            {"id": "ultra1", "label": "camera2 2, facing back"},
+        ],
+        "lens": "wide1",
+    }))
+    st = wait_for(viewer, "state")
+    check("レンズの一覧が視聴側へ伝わる",
+          bool(st and len(st.get("lenses", [])) == 2
+               and st["lens"] == "wide1"), st)
+    viewer.send(json.dumps({"t": "cmd", "action": "lens", "value": "ultra1"}))
+    cmd = wait_for(cam, "cmd")
+    check("レンズの切替指示が届く",
+          bool(cmd and cmd["action"] == "lens" and cmd.get("value") == "ultra1"),
+          cmd)
+    viewer.send(json.dumps({"t": "cmd", "action": "lens", "value": "存在しない"}))
+    check("知らないレンズの指名は中継されない",
+          wait_for(cam, "cmd", timeout=1.0) is None)
+    viewer.send(json.dumps({"t": "cmd", "action": "lens", "value": 3}))
+    check("文字列でないレンズ指名は無視される",
+          wait_for(cam, "cmd", timeout=1.0) is None)
+    cam.send(json.dumps({
+        "t": "camera_state", "state": "on",
+        "lenses": [{"id": "wide1"}, "こわれた値", {"label": "idが無い"}],
+        "lens": "wide1",
+    }))
+    st = wait_for(viewer, "state")
+    check("壊れたレンズ一覧は使える分だけ残る",
+          bool(st and len(st.get("lenses", [])) == 1
+               and st["lenses"][0]["id"] == "wide1"), st)
+
     print("--- ライト ---")
     cam.send(json.dumps({
         "t": "camera_state", "state": "on",

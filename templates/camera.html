@@ -62,6 +62,10 @@
       <button id="f-front" aria-pressed="false">前面</button>
     </div>
     <p class="sub">背面は画質が良く、前面は画面と同じ向きなので置き場所を決めやすい。</p>
+
+    <div class="label" style="margin:16px 0 8px">レンズ</div>
+    <div id="lens-list"></div>
+    <p class="sub" id="lens-note">カメラを起動すると、使えるレンズが出ます。</p>
   </div>
 
   <div class="err" id="error" hidden></div>
@@ -142,6 +146,11 @@
   let quality = localStorage.getItem('petcam.quality') === 'eco' ? 'eco' : 'normal';
   let audioOn = localStorage.getItem('petcam.audio') === 'on';
   let facing = localStorage.getItem('petcam.facing') === 'user' ? 'user' : 'environment';
+  /* どのレンズを使うか。空なら facingMode に任せる（従来どおり）。
+     広角レンズを持つ端末では、ここで選ぶと 0.6倍相当の広い画角になる。
+     ソフトでは画角を広げられないので、レンズが無い端末では選択肢も出ない。 */
+  let lensId = localStorage.getItem('petcam.lens') || '';
+  let lenses = [];           // [{id, label}]
 
   const pcs = new Map();     // 視聴者sid -> RTCPeerConnection
   const watchingSids = new Set();  // いま実際に画面を見ている人
@@ -275,6 +284,8 @@
       sounds: Object.keys(PETCAM_SOUNDS),  // 見る側が版の食い違いに気づけるように
       zoom: (st === 'on') ? zoomInfo() : null,
       torch: (st === 'on') ? torchInfo() : null,
+      lenses: (st === 'on') ? lenses : [],
+      lens: (st === 'on') ? lensId : '',
       standby: autoStandby,
       detect: detectOn,
       record: recordOn,
@@ -292,6 +303,25 @@
     $('btn-sleep').disabled = (st !== 'on');
   }
 
+  /* 使えるレンズを数える。
+     名前（label）はカメラの使用を許可したあとでないと空になるので、
+     映像が出てから呼ぶ。 */
+  async function refreshLenses() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) {
+      lenses = [];
+      return;
+    }
+    let list;
+    try { list = await navigator.mediaDevices.enumerateDevices(); }
+    catch (e) { lenses = []; return; }
+    lenses = list
+      .filter((d) => d.kind === 'videoinput')
+      .map((d, i) => ({
+        id: d.deviceId,
+        label: d.label || ('レンズ ' + (i + 1)),
+      }));
+  }
+
   // ---- カメラ ----------------------------------------------------------
   /* openStream / closeStream は「実際に映すかどうか」だけを扱う。
      利用者の意思（desired）はここでは変えない。
@@ -300,16 +330,32 @@
     if (stream) return;
     showError('');
     const q = QUALITY[effectiveQuality()];
+    const size = {
+      width:  { ideal: q.width },
+      height: { ideal: q.height },
+      frameRate: { ideal: q.fps, max: q.fps }
+    };
     try {
-      stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          facingMode: { ideal: facing },
-          width:  { ideal: q.width },
-          height: { ideal: q.height },
-          frameRate: { ideal: q.fps, max: q.fps }
-        },
-        audio: audioOn
-      });
+      /* レンズを指名しているときはそれを使う。
+         端末を替えたりブラウザが番号を振り直すと指名が外れるので、
+         失敗したら指名を捨てて、ふつうの前後指定でやり直す。 */
+      if (lensId) {
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: Object.assign({ deviceId: { exact: lensId } }, size),
+            audio: audioOn
+          });
+        } catch (e) {
+          lensId = '';
+          localStorage.removeItem('petcam.lens');
+        }
+      }
+      if (!stream) {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: Object.assign({ facingMode: { ideal: facing } }, size),
+          audio: audioOn
+        });
+      }
     } catch (e) {
       const msg = (e && e.name === 'NotAllowedError')
         ? 'カメラの使用が許可されませんでした。ブラウザのアドレスバー左のアイコンから許可してください。'
@@ -319,6 +365,15 @@
       return;
     }
     video.srcObject = stream;
+    /* 指名せずに開いたときは、いま実際に使っているレンズを控えておく。
+       視聴側でどれが選ばれているか見せるため。 */
+    const vt0 = stream.getVideoTracks()[0];
+    if (!lensId && vt0 && vt0.getSettings) {
+      const sg = vt0.getSettings();
+      if (sg && sg.deviceId) lensId = sg.deviceId;
+    }
+    await refreshLenses();
+    updateLensButtons();
     usingQuality = effectiveQuality();
     startRecorder();
     sound.ensure();
@@ -330,6 +385,8 @@
   }
 
   function closeStream() {
+    lenses = [];
+    updateLensButtons();
     torchOn = false;
     clearTimeout(torchTimer);
     torchTimer = null;
@@ -438,6 +495,39 @@
     quality = mode;
     localStorage.setItem('petcam.quality', mode);
     updateQualityButtons();
+    await restartCamera();
+  }
+
+  /* レンズのボタンは端末ごとに数が違うので、その場で組み立てる。 */
+  function updateLensButtons() {
+    const box = $('lens-list');
+    const note = $('lens-note');
+    if (!box) return;
+    box.textContent = '';
+    if (lenses.length <= 1) {
+      note.textContent = lenses.length === 1
+        ? 'この端末にはレンズが1つだけです。広角（0.6倍）は選べません。'
+        : 'カメラを起動すると、使えるレンズが出ます。';
+      return;
+    }
+    note.textContent =
+      'レンズを替えると画角が変わります。広角レンズがあれば、'
+      + 'それを選ぶと広く写ります。名前は端末がつけたものです。';
+    lenses.forEach((l) => {
+      const b = document.createElement('button');
+      b.textContent = l.label;
+      b.style.cssText = 'display:block; width:100%; margin-bottom:6px';
+      b.setAttribute('aria-pressed', String(l.id === lensId));
+      b.addEventListener('click', () => setLens(l.id));
+      box.appendChild(b);
+    });
+  }
+
+  async function setLens(id) {
+    if (lensId === id) return;
+    lensId = id;
+    localStorage.setItem('petcam.lens', id);
+    updateLensButtons();
     await restartCamera();
   }
 
@@ -1004,6 +1094,11 @@
     else if (m.action === 'audio_on') setAudio(true);
     else if (m.action === 'audio_off') setAudio(false);
     else if (m.action === 'zoom') applyZoom(m.value);
+    else if (m.action === 'lens') {
+      if (typeof m.value === 'string' && lenses.some((l) => l.id === m.value)) {
+        setLens(m.value);
+      }
+    }
     else if (m.action === 'torch_on') applyTorch(true);
     else if (m.action === 'torch_off') applyTorch(false);
     else if (m.action === 'standby_on') setAutoStandby(true);
