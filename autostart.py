@@ -93,8 +93,17 @@ def install() -> int:
 $ErrorActionPreference = 'Stop'
 $action = New-ScheduledTaskAction -Execute '{exe}' `
     -Argument '"{script}"' -WorkingDirectory '{BASE}'
-$trigger = New-ScheduledTaskTrigger -AtStartup
-$trigger.Delay = 'PT30S'
+$boot = New-ScheduledTaskTrigger -AtStartup
+$boot.Delay = 'PT30S'
+# 落ちたときに自力で戻るための見回り。
+# 「失敗したら再実行する」(-RestartCount) は、処理が異常終了しても
+# 動かないことがある。実際サーバが落ちたまま戻らなかった。
+# 2分ごとに起動をかけ直すほうが確実に効く。既に動いていれば
+# MultipleInstances IgnoreNew で何も起きない。
+$watch = New-ScheduledTaskTrigger -Once -At (Get-Date) `
+    -RepetitionInterval (New-TimeSpan -Minutes 2) `
+    -RepetitionDuration (New-TimeSpan -Days 3650)
+$trigger = @($boot, $watch)
 $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' `
     -LogonType ServiceAccount -RunLevel Highest
 $settings = New-ScheduledTaskSettingsSet `

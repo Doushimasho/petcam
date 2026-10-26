@@ -11,6 +11,7 @@
 外部CDNのJavaScriptを読み込まないので、インターネットが無くてもLAN内で動く。
 """
 import datetime
+import atexit
 import json
 import logging
 import logging.handlers
@@ -255,6 +256,7 @@ class Peer:
     def __init__(self, sid: str, ws: simple_websocket.Server):
         self.sid = sid
         self.ws = ws
+        self.last_seen = time.time()
         self.role: str | None = None
         # 画面を開いていても、裏に回っていれば見ていないものとして数える。
         # カメラを動かし続けるかどうかの判断に使う。
@@ -267,6 +269,18 @@ class Peer:
                 self.ws.send(json.dumps(obj, ensure_ascii=False))
         except Exception:
             pass  # 切れた接続への送信は無視する。切断処理は受信側が行う
+
+    def close(self) -> None:
+        """こちらから切る。送信と同じロックを通す。
+
+        閉じるのもソケットへの書き込みなので、send と混ざってはいけない。
+        混ざるとTLSの記録が壊れる（それでサーバが落ちていた）。
+        """
+        try:
+            with self._lock:
+                self.ws.close()
+        except Exception:
+            pass
 
 
 _lock = threading.Lock()
@@ -335,6 +349,37 @@ def broadcast_state() -> None:
         targets = list(peers.values())
     for p in targets:
         p.send(msg)
+
+
+# 返事が無い接続を片づけるまでの時間。
+# 短くしすぎると、画面を裏に回しただけの端末まで切ってしまう。
+PEER_DEAD_SEC = 120
+PEER_SWEEP_SEC = 15
+
+
+def sweep_peers() -> None:
+    """黙ったままの接続を閉じる。
+
+    simple_websocket にも ping を打つ仕掛けがあるが、使っていない。
+    あれは専用のスレッドからソケットへ直接書き込むので、
+    こちらの送信と混ざってTLSの記録を壊す。実際それでサーバが
+    アクセス違反（0xC0000005）で落ちていた。
+
+    同じ役目は、こちらで持つほうが安全にできる。
+    画面側は10秒ごとに ping を送ってくるので、それが途切れたかを見れば足りる。
+    閉じるときも Peer.close() を通すので、送信と直列になる。
+    """
+    while True:
+        time.sleep(PEER_SWEEP_SEC)
+        now = time.time()
+        with _lock:
+            stale = [p for p in peers.values()
+                     if now - p.last_seen > PEER_DEAD_SEC]
+        for p in stale:
+            logging.getLogger("werkzeug").info(
+                "%s からの返事が %d 秒ありません。閉じます（%s）",
+                p.role or "接続", PEER_DEAD_SEC, p.sid)
+            p.close()
 
 
 def send_to(sid: str, obj: dict) -> None:
@@ -887,7 +932,9 @@ def on_close(peer: Peer) -> None:
 def ws_endpoint():
     if not authed():
         return "", 403
-    ws = simple_websocket.Server(request.environ, ping_interval=20)
+    # ping_interval は渡さない。sweep_peers() の説明のとおり、
+    # あれを有効にすると別スレッドが同じソケットへ書き込んでしまう。
+    ws = simple_websocket.Server(request.environ)
     peer = Peer(uuid.uuid4().hex[:12], ws)
     with _lock:
         peers[peer.sid] = peer
@@ -898,6 +945,7 @@ def ws_endpoint():
             raw = ws.receive()
             if raw is None:
                 break
+            peer.last_seen = time.time()
             try:
                 msg = json.loads(raw)
             except (ValueError, TypeError):
@@ -1062,6 +1110,14 @@ def main() -> None:
         log,
         have_now=ts_name is not None,
     )
+
+    threading.Thread(target=sweep_peers, daemon=True,
+                     name="peer-sweep").start()
+
+    # 異常終了したかどうかを、あとから記録だけで見分けられるようにする。
+    # 落ちたときはこの行が出ないので、次の起動との間に何も無ければ
+    # 前回は落ちたと分かる。
+    atexit.register(lambda: log.info("サーバを終了しました"))
 
     say("=" * 60)
     say("  PET CAMERA サーバを起動しました")
