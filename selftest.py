@@ -374,6 +374,45 @@ def main() -> int:
     check("そのとき CAMERA も OFF に戻る", bool(st and st["camera"] == "off"), st)
     viewer.close()
 
+    # これは最後に置く。待ち時間を縮めるため見張りの設定を書き換えるので、
+    # 他の接続が残っているうちにやると巻き添えで切ってしまう。
+    print("--- 黙った接続の片づけ ---")
+    server.PEER_DEAD_SEC = 2
+    server.PEER_SWEEP_SEC = 1
+    threading.Thread(target=server.sweep_peers, daemon=True,
+                     name="sweep-test").start()
+    quiet = connect(cookie)
+    wait_for(quiet, "state", timeout=2)
+    closed = False
+    limit = time.time() + 10
+    while time.time() < limit:
+        try:
+            quiet.receive(timeout=1)
+        except simple_websocket.ConnectionClosed:
+            closed = True
+            break
+        except OSError:
+            closed = True
+            break
+    check("返事の無い接続はサーバ側から片づけられる", closed)
+
+    talkative = connect(cookie)
+    wait_for(talkative, "state", timeout=2)
+    alive = True
+    limit = time.time() + 6
+    while time.time() < limit:
+        try:
+            talkative.send(json.dumps({"t": "ping"}))
+            talkative.receive(timeout=0.8)
+        except (simple_websocket.ConnectionClosed, OSError):
+            alive = False
+            break
+    check("声をかけ続けている接続は切られない", alive)
+    try:
+        talkative.close()
+    except Exception:
+        pass
+
     print()
     print("結果: " + ("全て通過" if not fails else f"{len(fails)}件 失敗 -> {fails}"))
     return 1 if fails else 0
